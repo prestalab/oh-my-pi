@@ -1,0 +1,40 @@
+name: Build Windows x64
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - fix/gitlab-duo-compaction-boundaries
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
+
+      - run: bun install --frozen-lockfile
+
+      - name: Install prebuilt Windows native addon
+        uses: ./.github/actions/native-artifacts
+        with:
+          targets: win32-x64-baseline
+
+      - name: Build Windows binary
+        env:
+          RELEASE_TARGETS: win32-x64
+        run: bun run ci:release:build-binaries
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: omp-windows-x64
+          path: packages/coding-agent/binaries/omp-windows-x64.exe
