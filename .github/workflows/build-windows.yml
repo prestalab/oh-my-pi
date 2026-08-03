@@ -24,10 +24,21 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
-      - name: Install prebuilt Windows native addon
-        uses: ./.github/actions/native-artifacts
-        with:
-          targets: win32-x64-baseline
+      - name: Install Windows native addon
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(bun -e 'const p = await Bun.file("packages/natives/package.json").json(); console.log(p.version)')"
+          package="@oh-my-pi/pi-natives-win32-x64@${version}"
+          npm pack "$package" --pack-destination "$RUNNER_TEMP"
+          tarball="$RUNNER_TEMP/pi-natives-win32-x64-${version}.tgz"
+          extract_dir="$RUNNER_TEMP/pi-natives-win32-x64"
+          mkdir -p "$extract_dir"
+          tar -xzf "$tarball" -C "$extract_dir"
+          addon="$(find "$extract_dir/package" -type f -name 'pi_natives.win32-x64*.node' -print -quit)"
+          test -n "$addon"
+          mkdir -p packages/natives/native
+          cp "$addon" packages/natives/native/pi_natives.win32-x64-baseline.node
 
       - name: Build Windows binary
         env:
