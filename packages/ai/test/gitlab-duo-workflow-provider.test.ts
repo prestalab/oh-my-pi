@@ -3197,7 +3197,7 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 		}
 	});
 
-	it("does not recover a marked plaintext call for an unadvertised tool", async () => {
+	it("recovers a marked mounted-tool call for host fallback resolution", async () => {
 		const socket: GitLabDuoWorkflowWebSocketLike = {
 			onopen: null,
 			onmessage: null,
@@ -3231,13 +3231,20 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 			{ apiKey: "redacted" },
 		);
 		socket.onopen?.(new Event("open"));
-		socket.onmessage?.(terminalGitLabDuoWorkflowMessage('xd:tool_call\n{"tool":"bash","args":{"command":"pwd"}}'));
+		const fallback = 'xd:tool_call\n{"tool":"browser","args":{"action":"open","url":"file:///tmp/index.html"}}';
+		socket.onmessage?.(terminalGitLabDuoWorkflowMessage(fallback));
 
 		const result = await streamPromise;
 		const finalOutput = await stream.result();
 		expect(result).toBe("terminal");
-		expect(finalOutput.stopReason).toBe("stop");
-		expect(finalOutput.content.some(block => block.type === "toolCall")).toBe(false);
+		expect(finalOutput.stopReason).toBe("toolUse");
+		expect(finalOutput.content).toContainEqual({
+			type: "toolCall",
+			id: expect.stringMatching(/^ptc_/),
+			name: "browser",
+			arguments: { action: "open", url: "file:///tmp/index.html" },
+			rawBlock: fallback,
+		});
 	});
 
 	it("renders procedural agent checkpoints as text, matching the official chat client", async () => {

@@ -55,7 +55,7 @@
 - Fixed an issue where Cursor `kimi-k3` sessions would break permanently when a same-model assistant turn was persisted without thinking blocks, replacing hard errors with graceful warnings.
 ### Fixed
 
-- **Critical GitLab Duo tool reliability fix:** Explicit `xd:tool_call` fallbacks emitted as plain text are now validated against the advertised MCP tool allow-list and converted into structured tool calls, preventing valid tool requests from being rendered as prose and silently ending the turn.
+- **Critical GitLab Duo tool reliability fix:** Explicit `xd:tool_call` fallbacks emitted as plain text are now converted into structured tool calls. Advertised MCP tools execute normally, mounted `xd://` tools reach the host fallback resolver, and unknown names produce an explicit tool error instead of being rendered as prose and silently ending the turn.
 
 ## [17.2.6] - 2026-08-03
 

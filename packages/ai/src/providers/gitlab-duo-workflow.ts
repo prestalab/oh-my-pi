@@ -2298,6 +2298,7 @@ async function handleGitLabDuoWorkflowSocketMessage(
 			traceGitLabDuoWorkflow("websocket.plaintext_tool_recovered", {
 				status,
 				toolName: plaintextToolCall.name,
+				advertised: state.mcpToolNames?.has(plaintextToolCall.name) === true,
 			});
 			emitGitLabDuoWorkflowToolCall(state, plaintextToolCall);
 			return "terminal";
@@ -3370,7 +3371,10 @@ function parseJsonRecord(text: string): Record<string, unknown> | null {
  * Recover the single, explicitly-marked fallback emitted when GitLab's model
  * adapter cannot produce a native MCP action. This is deliberately not a
  * general JSON/tool parser: the marked suffix must contain exactly one JSON
- * object, and the name must have been advertised in this request's mcpTools.
+ * object. Advertised MCP tools execute normally; mounted xd:// tools are not
+ * present in mcpTools, so the agent host's fallback resolver decides whether
+ * such a name is executable. An unknown name becomes an explicit tool error
+ * instead of silently ending the turn.
  * Some models prepend narration without even a newline before the marker; keep
  * that prose visible, but still recover the explicit suffix as a tool call.
  */
@@ -3384,7 +3388,7 @@ function extractGitLabDuoWorkflowPlaintextToolCall(state: GitLabDuoWorkflowStrea
 		let markerIndex = text.lastIndexOf(GITLAB_DUO_WORKFLOW_PLAINTEXT_TOOL_MARKER);
 		while (markerIndex >= 0) {
 			const rawBlock = text.slice(markerIndex).trim();
-			const toolCall = parseGitLabDuoWorkflowPlaintextToolCall(rawBlock, state.mcpToolNames);
+			const toolCall = parseGitLabDuoWorkflowPlaintextToolCall(rawBlock);
 			if (toolCall) return toolCall;
 			if (markerIndex === 0) break;
 			markerIndex = text.lastIndexOf(GITLAB_DUO_WORKFLOW_PLAINTEXT_TOOL_MARKER, markerIndex - 1);
@@ -3393,10 +3397,7 @@ function extractGitLabDuoWorkflowPlaintextToolCall(state: GitLabDuoWorkflowStrea
 	return undefined;
 }
 
-function parseGitLabDuoWorkflowPlaintextToolCall(
-	rawBlock: string,
-	advertisedToolNames: ReadonlySet<string>,
-): ToolCall | undefined {
+function parseGitLabDuoWorkflowPlaintextToolCall(rawBlock: string): ToolCall | undefined {
 	const newline = rawBlock.indexOf("\n");
 	if (newline < 0 || rawBlock.slice(0, newline).trimEnd() !== GITLAB_DUO_WORKFLOW_PLAINTEXT_TOOL_MARKER) {
 		return undefined;
@@ -3404,7 +3405,7 @@ function parseGitLabDuoWorkflowPlaintextToolCall(
 	const record = parseJsonRecord(rawBlock.slice(newline + 1).trim());
 	if (!record) return undefined;
 	const name = stringField(record, "tool") ?? stringField(record, "name");
-	if (!name || !advertisedToolNames.has(name)) return undefined;
+	if (!name) return undefined;
 	let rawArguments = record.args ?? record.arguments ?? {};
 	if (typeof rawArguments === "string") {
 		const parsedArguments = parseJsonRecord(rawArguments);
