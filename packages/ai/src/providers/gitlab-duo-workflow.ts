@@ -293,6 +293,8 @@ interface GitLabDuoWorkflowStartMetadataOptions {
 	rootNamespaceId?: string;
 	workflowDefinition?: GitLabDuoWorkflowDefinition;
 	inlineFlow?: boolean;
+	/** Tool-choice constraint represented in the inline flow system slot. */
+	toolChoice?: ToolChoice;
 }
 export interface GitLabMcpToolDefinition {
 	name: string;
@@ -608,7 +610,7 @@ export function buildGitLabDuoWorkflowStartRequest(
 		preapproved_tools: mcpTools.map(tool => tool.name),
 		flowConfigSchemaVersion: "v1" as const,
 		flowConfig: buildGitLabDuoWorkflowInlineFlowConfig(
-			buildGitLabDuoWorkflowSystemPrompt(context, mcpTools.length > 0),
+			buildGitLabDuoWorkflowSystemPrompt(context, mcpTools.length > 0, metadataOptions.toolChoice),
 		),
 	};
 }
@@ -1263,6 +1265,7 @@ async function runGitLabDuoWorkflow(
 				rootNamespaceId: restNamespaceId,
 				workflowDefinition,
 				inlineFlow: isGitLabDuoWorkflowInlineFlow(workflowDefinition),
+				toolChoice: options.toolChoice,
 			},
 		);
 		return {
@@ -2783,11 +2786,20 @@ const GITLAB_DUO_WORKFLOW_TOOL_FALLBACK_NOTE = toolFallbackNote.trim();
 // transcript (not a lone bare-text prompt), append the history-note so the model does
 // not mimic the transcript's `<|im_start|>`/`<ran …>` markers as its own tool-call
 // output — markers it kept copying even after they were reframed to past tense.
-function buildGitLabDuoWorkflowSystemPrompt(context: Context, hasTools: boolean): string {
+function buildGitLabDuoWorkflowSystemPrompt(
+	context: Context,
+	hasTools: boolean,
+	toolChoice: ToolChoice | undefined,
+): string {
 	const base = normalizeSystemPrompts(context.systemPrompt).join("\n\n");
 	const notes: string[] = [];
 	if (isGitLabDuoWorkflowChatMlGoal(context)) notes.push(GITLAB_DUO_WORKFLOW_CHATML_HISTORY_NOTE);
 	if (hasTools) notes.push(GITLAB_DUO_WORKFLOW_TOOL_FALLBACK_NOTE);
+	if (hasTools && (toolChoice === "required" || toolChoice === "any")) {
+		notes.push(
+			"## Required tool action\n\nThis request MUST issue at least one attached tool call. Ordinary prose, a status update, or a promise to act cannot complete this turn. Use the native structured tool interface when available; otherwise use the exact `xd:tool_call` fallback described above.",
+		);
+	}
 	return [base, ...notes].filter(Boolean).join("\n\n");
 }
 

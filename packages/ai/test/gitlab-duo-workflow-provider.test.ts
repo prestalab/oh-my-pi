@@ -310,6 +310,27 @@ describe("GitLab Duo Workflow provider protocol", () => {
 		expect(prompt?.prompt_template.system).toContain('{"tool":"read","args":');
 	});
 
+	it("carries required tool choice into the inline flow system slot", () => {
+		const systemContext: Context = {
+			systemPrompt: ["OMP authoritative operating rules. Bridge the local tools."],
+			messages: context.messages,
+		};
+		const payload = buildGitLabDuoWorkflowStartRequest(
+			"workflow-1",
+			model,
+			systemContext,
+			[nativeTools[0]!],
+			undefined,
+			{ toolChoice: "required" },
+		);
+		const agent = payload.flowConfig?.components[0];
+		const prompt = payload.flowConfig?.prompts.find(entry => entry.prompt_id === agent?.prompt_id);
+
+		expect(prompt?.prompt_template.system).toContain("Required tool action");
+		expect(prompt?.prompt_template.system).toContain("MUST issue at least one attached tool call");
+		expect(prompt?.prompt_template.system).toContain("xd:tool_call");
+	});
+
 	it("always emits the inline ambient flowConfig (no server-side registry path)", () => {
 		const payload = buildGitLabDuoWorkflowStartRequest("workflow-1", model, context);
 		expect(payload.workflowDefinition).toBe("ambient");
