@@ -4,6 +4,7 @@ import {
 	discoverGitLabDuoWorkflowRuntimeNamespace,
 	type GitLabDuoWorkflowNamespaceSelection,
 } from "@oh-my-pi/pi-catalog/discovery/gitlab-duo-workflow";
+import { mintToolCallId } from "../dialect/coercion";
 import * as AIError from "../error";
 import type {
 	Api,
@@ -24,6 +25,7 @@ import { normalizeSystemPrompts } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { toolWireSchema } from "../utils/schema/wire";
 import chatmlHistoryNote from "./gitlab-duo-workflow-chatml-note.md" with { type: "text" };
+import toolFallbackNote from "./gitlab-duo-workflow-tool-fallback.md" with { type: "text" };
 import { redactSensitiveCredentials } from "./transform-messages";
 
 export const GITLAB_DUO_WORKFLOW_PROVIDER_ID = "gitlab-duo-agent";
@@ -41,6 +43,7 @@ const DEFAULT_GITLAB_DUO_WORKFLOW_TRACE_FILE = path.resolve(
 	"../../../../.tmp/gitlab-duo-workflow-trace.log",
 );
 const GITLAB_DUO_WORKFLOW_CLIENT_TYPE = "node-websocket";
+const GITLAB_DUO_WORKFLOW_PLAINTEXT_TOOL_MARKER = "xd:tool_call";
 /**
  * Time allowed for the WebSocket handshake / first frame before the provider
  * gives up on this connection attempt. Once the socket is open we rely on the
@@ -290,6 +293,8 @@ interface GitLabDuoWorkflowStartMetadataOptions {
 	rootNamespaceId?: string;
 	workflowDefinition?: GitLabDuoWorkflowDefinition;
 	inlineFlow?: boolean;
+	/** Tool-choice constraint represented in the inline flow system slot. */
+	toolChoice?: ToolChoice;
 }
 export interface GitLabMcpToolDefinition {
 	name: string;
@@ -438,6 +443,8 @@ export interface GitLabDuoWorkflowStreamState {
 	stalledRequested?: boolean;
 	providerSessionState?: GitLabDuoWorkflowProviderSessionState;
 	lastApprovalStatus?: string;
+	/** Exact MCP names advertised on this request; plaintext recovery never escapes this allow-list. */
+	mcpToolNames?: ReadonlySet<string>;
 	// When the rendered goal exceeds the byte budget, this carries an overflow-pattern
 	// message. A terminal/exhausted error then surfaces THIS instead of the raw server
 	// error so `isContextOverflow` recognizes it and the agent loop auto-compacts. Left
@@ -602,7 +609,9 @@ export function buildGitLabDuoWorkflowStartRequest(
 		mcpTools,
 		preapproved_tools: mcpTools.map(tool => tool.name),
 		flowConfigSchemaVersion: "v1" as const,
-		flowConfig: buildGitLabDuoWorkflowInlineFlowConfig(buildGitLabDuoWorkflowSystemPrompt(context)),
+		flowConfig: buildGitLabDuoWorkflowInlineFlowConfig(
+			buildGitLabDuoWorkflowSystemPrompt(context, mcpTools.length > 0, metadataOptions.toolChoice),
+		),
 	};
 }
 
@@ -755,9 +764,15 @@ function emitGitLabDuoWorkflowActionToolCall(
 	state: GitLabDuoWorkflowStreamState,
 	action: GitLabDuoWorkflowActionDescriptor,
 ): void {
+	emitGitLabDuoWorkflowToolCall(state, buildGitLabDuoWorkflowActionToolCall(action));
+	if (state.providerSessionState?.active) {
+		state.providerSessionState.active.pendingActions = [action];
+	}
+}
+
+function emitGitLabDuoWorkflowToolCall(state: GitLabDuoWorkflowStreamState, toolCall: ToolCall): void {
 	endGitLabDuoWorkflowText(state);
 	endGitLabDuoWorkflowThinking(state);
-	const toolCall = buildGitLabDuoWorkflowActionToolCall(action);
 	state.output.content.push(toolCall);
 	const contentIndex = state.output.content.length - 1;
 	state.stream.push({ type: "toolcall_start", contentIndex, partial: state.output });
@@ -769,9 +784,6 @@ function emitGitLabDuoWorkflowActionToolCall(
 	});
 	state.stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: state.output });
 	finishGitLabDuoWorkflowStream(state, "toolUse");
-	if (state.providerSessionState?.active) {
-		state.providerSessionState.active.pendingActions = [action];
-	}
 }
 
 // Decide whether THIS tool-call boundary signals a stalled workflow. The control
@@ -1253,6 +1265,7 @@ async function runGitLabDuoWorkflow(
 				rootNamespaceId: restNamespaceId,
 				workflowDefinition,
 				inlineFlow: isGitLabDuoWorkflowInlineFlow(workflowDefinition),
+				toolChoice: options.toolChoice,
 			},
 		);
 		return {
@@ -1932,6 +1945,7 @@ export function runGitLabDuoWorkflowSocket(
 	resumeResponse?: GitLabDuoWorkflowActionResponse | readonly GitLabDuoWorkflowActionResponse[],
 	replayMessages?: readonly unknown[],
 ): Promise<GitLabDuoWorkflowSocketResult> {
+	state.mcpToolNames = new Set(startPayload.mcpTools.map(tool => tool.name));
 	const { promise, resolve, reject } = Promise.withResolvers<GitLabDuoWorkflowSocketResult>();
 	let settled = false;
 	// Resume/replay calls operate on an already-open socket (`ws.onopen` is nulled
@@ -2282,6 +2296,16 @@ async function handleGitLabDuoWorkflowSocketMessage(
 	}
 	if (isGitLabWorkflowCompletionStatus(status)) {
 		traceGitLabDuoWorkflow("websocket.terminal", { status, checkpointLength: checkpoint?.contentLength ?? 0 });
+		const plaintextToolCall = extractGitLabDuoWorkflowPlaintextToolCall(state);
+		if (plaintextToolCall) {
+			traceGitLabDuoWorkflow("websocket.plaintext_tool_recovered", {
+				status,
+				toolName: plaintextToolCall.name,
+				advertised: state.mcpToolNames?.has(plaintextToolCall.name) === true,
+			});
+			emitGitLabDuoWorkflowToolCall(state, plaintextToolCall);
+			return "terminal";
+		}
 		if (!state.currentWorkflowHasVisibleOutput) {
 			traceGitLabDuoWorkflow("websocket.empty_terminal", {
 				status,
@@ -2753,6 +2777,7 @@ interface GitLabDuoWorkflowReplayMessage {
 // Trimmed once: the static note tells the model the goal transcript's ChatML/`<ran>`
 // markers are a historical record, not a syntax to emit.
 const GITLAB_DUO_WORKFLOW_CHATML_HISTORY_NOTE = chatmlHistoryNote.trim();
+const GITLAB_DUO_WORKFLOW_TOOL_FALLBACK_NOTE = toolFallbackNote.trim();
 
 // The OMP system prompt that rides the inline flow's `prompt_template.system` slot.
 // DWS wraps it in its own gateway boilerplate, but the slot content is delivered to
@@ -2761,10 +2786,21 @@ const GITLAB_DUO_WORKFLOW_CHATML_HISTORY_NOTE = chatmlHistoryNote.trim();
 // transcript (not a lone bare-text prompt), append the history-note so the model does
 // not mimic the transcript's `<|im_start|>`/`<ran …>` markers as its own tool-call
 // output — markers it kept copying even after they were reframed to past tense.
-function buildGitLabDuoWorkflowSystemPrompt(context: Context): string {
+function buildGitLabDuoWorkflowSystemPrompt(
+	context: Context,
+	hasTools: boolean,
+	toolChoice: ToolChoice | undefined,
+): string {
 	const base = normalizeSystemPrompts(context.systemPrompt).join("\n\n");
-	if (!isGitLabDuoWorkflowChatMlGoal(context)) return base;
-	return base ? `${base}\n\n${GITLAB_DUO_WORKFLOW_CHATML_HISTORY_NOTE}` : GITLAB_DUO_WORKFLOW_CHATML_HISTORY_NOTE;
+	const notes: string[] = [];
+	if (isGitLabDuoWorkflowChatMlGoal(context)) notes.push(GITLAB_DUO_WORKFLOW_CHATML_HISTORY_NOTE);
+	if (hasTools) notes.push(GITLAB_DUO_WORKFLOW_TOOL_FALLBACK_NOTE);
+	if (hasTools && (toolChoice === "required" || toolChoice === "any")) {
+		notes.push(
+			"## Required tool action\n\nThis request MUST issue at least one attached tool call. Ordinary prose, a status update, or a promise to act cannot complete this turn. Use the native structured tool interface when available; otherwise use the exact `xd:tool_call` fallback described above.",
+		);
+	}
+	return [base, ...notes].filter(Boolean).join("\n\n");
 }
 
 // A goal renders as a literal ChatML transcript only when more than one turn survives
@@ -3341,6 +3377,61 @@ function parseJsonRecord(text: string): Record<string, unknown> | null {
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * Recover the single, explicitly-marked fallback emitted when GitLab's model
+ * adapter cannot produce a native MCP action. This is deliberately not a
+ * general JSON/tool parser: the marked suffix must contain exactly one JSON
+ * object. Advertised MCP tools execute normally; mounted xd:// tools are not
+ * present in mcpTools, so the agent host's fallback resolver decides whether
+ * such a name is executable. An unknown name becomes an explicit tool error
+ * instead of silently ending the turn.
+ * Some models prepend narration without even a newline before the marker; keep
+ * that prose visible, but still recover the explicit suffix as a tool call.
+ */
+function extractGitLabDuoWorkflowPlaintextToolCall(state: GitLabDuoWorkflowStreamState): ToolCall | undefined {
+	if (!state.mcpToolNames || state.mcpToolNames.size === 0) return undefined;
+	if (state.output.content.some(block => block.type === "toolCall")) return undefined;
+	for (let index = state.output.content.length - 1; index >= 0; index--) {
+		const block = state.output.content[index];
+		if (block?.type !== "text") continue;
+		const text = block.text.trim();
+		let markerIndex = text.lastIndexOf(GITLAB_DUO_WORKFLOW_PLAINTEXT_TOOL_MARKER);
+		while (markerIndex >= 0) {
+			const rawBlock = text.slice(markerIndex).trim();
+			const toolCall = parseGitLabDuoWorkflowPlaintextToolCall(rawBlock);
+			if (toolCall) return toolCall;
+			if (markerIndex === 0) break;
+			markerIndex = text.lastIndexOf(GITLAB_DUO_WORKFLOW_PLAINTEXT_TOOL_MARKER, markerIndex - 1);
+		}
+	}
+	return undefined;
+}
+
+function parseGitLabDuoWorkflowPlaintextToolCall(rawBlock: string): ToolCall | undefined {
+	const newline = rawBlock.indexOf("\n");
+	if (newline < 0 || rawBlock.slice(0, newline).trimEnd() !== GITLAB_DUO_WORKFLOW_PLAINTEXT_TOOL_MARKER) {
+		return undefined;
+	}
+	const record = parseJsonRecord(rawBlock.slice(newline + 1).trim());
+	if (!record) return undefined;
+	const name = stringField(record, "tool") ?? stringField(record, "name");
+	if (!name) return undefined;
+	let rawArguments = record.args ?? record.arguments ?? {};
+	if (typeof rawArguments === "string") {
+		const parsedArguments = parseJsonRecord(rawArguments);
+		if (!parsedArguments) return undefined;
+		rawArguments = parsedArguments;
+	}
+	if (!rawArguments || typeof rawArguments !== "object" || Array.isArray(rawArguments)) return undefined;
+	return {
+		type: "toolCall",
+		id: mintToolCallId(),
+		name,
+		arguments: rawArguments as Record<string, unknown>,
+		rawBlock,
+	};
 }
 
 function numberField(record: Record<string, unknown>, key: string): number | undefined {

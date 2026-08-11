@@ -31,6 +31,13 @@
  */
 import type { TaskItem, TaskParams } from "./types";
 
+const MISSING_BATCH_CONTEXT = "No additional shared context was provided; each task item is self-contained.";
+
+interface ClaudeStyleTaskAliases {
+	description?: unknown;
+	subagent_type?: unknown;
+}
+
 /** A backslash that escapes a structural char — `\"`, `\\`, `\/`, or `\uXXXX`. */
 const STRUCTURAL_ESCAPE = /\\(?:["\\/]|u[0-9a-fA-F]{4})/;
 
@@ -79,12 +86,30 @@ export function repairDoubleEncodedJsonString(value: string): string {
 	return typeof decoded === "string" && decoded !== value ? decoded : value;
 }
 
-/** Repair a single (possibly partial) task item's prose field (`task`). */
+function nonEmptyString(value: unknown): string | undefined {
+	return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function hasClaudeStyleAliases(value: unknown): value is ClaudeStyleTaskAliases {
+	if (value === null || typeof value !== "object") return false;
+	const aliases = value as ClaudeStyleTaskAliases;
+	return nonEmptyString(aliases.description) !== undefined || nonEmptyString(aliases.subagent_type) !== undefined;
+}
+
+/**
+ * Repair a single (possibly partial) task item. GitLab-backed Claude models can
+ * reuse Claude Code's task vocabulary (`description`, `subagent_type`) even
+ * though OMP advertises `task`, `agent`; accept those unambiguous aliases at
+ * the execution boundary.
+ */
 function repairTaskItem(item: TaskItem): TaskItem {
 	if (item === null || typeof item !== "object") return item;
-	const task = typeof item.task === "string" ? repairDoubleEncodedJsonString(item.task) : item.task;
-	if (task === item.task) return item;
-	return { ...item, task };
+	const aliases = item as TaskItem & ClaudeStyleTaskAliases;
+	const sourceTask = nonEmptyString(item.task) ?? nonEmptyString(aliases.description) ?? item.task;
+	const task = typeof sourceTask === "string" ? repairDoubleEncodedJsonString(sourceTask) : sourceTask;
+	const agent = nonEmptyString(item.agent) ?? nonEmptyString(aliases.subagent_type) ?? item.agent;
+	if (task === item.task && agent === item.agent) return item;
+	return { ...item, task, agent };
 }
 
 /**
@@ -97,11 +122,15 @@ function repairTaskItem(item: TaskItem): TaskItem {
 export function repairTaskParams(params: TaskParams): TaskParams {
 	if (params === null || typeof params !== "object") return params;
 
-	const task = typeof params.task === "string" ? repairDoubleEncodedJsonString(params.task) : params.task;
-	const context = typeof params.context === "string" ? repairDoubleEncodedJsonString(params.context) : params.context;
+	const aliases = params as TaskParams & ClaudeStyleTaskAliases;
+	const sourceTask = nonEmptyString(params.task) ?? nonEmptyString(aliases.description) ?? params.task;
+	const task = typeof sourceTask === "string" ? repairDoubleEncodedJsonString(sourceTask) : sourceTask;
+	const agent = nonEmptyString(params.agent) ?? nonEmptyString(aliases.subagent_type) ?? params.agent;
+	let context = typeof params.context === "string" ? repairDoubleEncodedJsonString(params.context) : params.context;
 
 	let tasks = params.tasks;
 	if (Array.isArray(params.tasks)) {
+		const containsClaudeStyleAliases = params.tasks.some(hasClaudeStyleAliases);
 		let changed = false;
 		const repaired = params.tasks.map(item => {
 			const next = repairTaskItem(item);
@@ -109,10 +138,13 @@ export function repairTaskParams(params: TaskParams): TaskParams {
 			return next;
 		});
 		if (changed) tasks = repaired;
+		if (containsClaudeStyleAliases && nonEmptyString(context) === undefined) {
+			context = MISSING_BATCH_CONTEXT;
+		}
 	}
 
-	if (task === params.task && context === params.context && tasks === params.tasks) {
+	if (task === params.task && agent === params.agent && context === params.context && tasks === params.tasks) {
 		return params;
 	}
-	return { ...params, task, context, tasks };
+	return { ...params, task, agent, context, tasks };
 }

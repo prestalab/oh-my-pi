@@ -15,6 +15,7 @@
  * when the agent has nothing else to do.
  */
 
+import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
 	AgentToolContext,
@@ -25,12 +26,12 @@ import type {
 import type { ToolExample } from "@oh-my-pi/pi-ai";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { prompt } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import { IrcBus } from "../../irc/bus";
 import type { Theme } from "../../modes/theme/theme";
 import hubDescription from "../../prompts/tools/hub.md" with { type: "text" };
 import type { AgentRegistry } from "../../registry/agent-registry";
+import { parseCommandArgs } from "../../utils/command-args";
 import type { ToolSession } from "..";
 import {
 	buildJobResult,
@@ -84,6 +85,9 @@ const hubSchema = type({
 	"peek?": type("boolean").describe("inbox: list messages without consuming them"),
 	"name?": type("string <= 48").describe("process ops: stable project-scoped launch name"),
 	"application?": type("string > 0").describe("start: executable or application path"),
+	"command?": type("string > 0").describe(
+		"start compatibility alias: command line split into application + args and executed directly (no implicit shell)",
+	),
 	"args?": type("string[]").describe("start: argv passed directly to the application"),
 	"env?": type({ "[string]": "string" }).describe("start: extra environment variables"),
 	"cwd?": type("string").describe("start: working directory; defaults to the session directory"),
@@ -115,7 +119,21 @@ const hubSchema = type({
 	"timeout?": type("number > 0").describe("logs/stop/wait with name: max seconds; default 30 (stop: 5)"),
 });
 
-type HubParams = typeof hubSchema.infer;
+export type HubParams = typeof hubSchema.infer;
+
+/** Repair the common bash-shaped `command` alias without introducing an implicit shell. */
+export function repairHubParams(params: HubParams): HubParams {
+	const command = params.command?.trim();
+	if (params.op !== "start" || params.application?.trim() || !command) return params;
+	const [application, ...commandArgs] = parseCommandArgs(command);
+	if (!application) return params;
+	const { command: _command, ...rest } = params;
+	return {
+		...rest,
+		application,
+		args: [...commandArgs, ...(params.args ?? [])],
+	};
+}
 
 interface MessagingDeps {
 	registry: AgentRegistry;
@@ -323,7 +341,8 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		if (!this.session.settings.get("launch.enabled")) {
 			return hubErrorResult("Process supervision is disabled (launch.enabled=false).", { op: params.op });
 		}
-		const { op: _hubOp, ...rest } = params;
+		const repaired = repairHubParams(params);
+		const { op: _hubOp, command: _command, ...rest } = repaired;
 		return executeLaunch(this.session, { ...rest, op }, signal);
 	}
 

@@ -21,7 +21,7 @@ import {
 	setProjectDir,
 	VERSION,
 } from "@oh-my-pi/pi-utils";
-import chalk from "chalk";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "./capability";
 import { type Args, reportUnrecognizedFlags } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
@@ -34,6 +34,7 @@ import { ModelRegistry } from "./config/model-registry";
 import {
 	DEFAULT_PREWALK_TARGET,
 	expandRoleAlias,
+	filterAvailableModelsByEnabledPatterns,
 	getModelMatchPreferences,
 	resolveCliModel,
 	resolveModelRoleValue,
@@ -52,6 +53,7 @@ import {
 } from "./discovery/helpers";
 import { injectOmpExtensionCliRoots } from "./discovery/omp-extension-roots";
 import { formatExtensionLoadNotifications } from "./extensibility/extensions/load-errors";
+import { loadExtensions } from "./extensibility/extensions/loader";
 import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
@@ -325,7 +327,13 @@ export async function submitInteractiveInput(
 				display: input.display ?? false,
 				attribution: "agent" as const,
 			};
-			await session.promptCustomMessage(message, { streamingBehavior });
+			await session.promptCustomMessage(message, {
+				streamingBehavior,
+				// An active goal can only terminate correctly by calling goal.complete.
+				// Requiring a tool on autonomous continuation also prevents the
+				// narration-only loop: intent -> text stop -> same intent.
+				toolChoice: input.customType === "goal-continuation" ? "required" : undefined,
+			});
 		} else if (input.synthetic) {
 			// Synthetic continue shortcuts are hidden developer prompts. The streaming
 			// queue (#queueUserMessage) only carries user-attributed messages, so we do
@@ -358,9 +366,29 @@ export interface AcpSessionFactoryOptions {
 	sessionDir?: string;
 	authStorage: AuthStorage;
 	modelRegistry: ModelRegistry;
-	parsedArgs: Pick<Args, "apiKey">;
+	parsedArgs: Pick<Args, "apiKey" | "trustedExtensions">;
 	rawArgs: string[];
 	createSession: (options: CreateAgentSessionOptions) => Promise<CreateAgentSessionResult>;
+}
+
+async function loadTrustedSessionExtensions(
+	options: Pick<CreateAgentSessionOptions, "additionalExtensionPaths">,
+	cwd: string,
+	eventBus: EventBus,
+) {
+	const paths = options.additionalExtensionPaths ?? [];
+	for (const trustedPath of paths) {
+		let stat: fsSync.Stats;
+		try {
+			stat = fsSync.statSync(trustedPath);
+		} catch {
+			throw new Error(`Trusted extension must be an existing module file: ${trustedPath}`);
+		}
+		if (!stat.isFile()) {
+			throw new Error(`Trusted extension must be a module file, not a directory: ${trustedPath}`);
+		}
+	}
+	return loadExtensions(paths, cwd, eventBus);
 }
 
 /**
@@ -385,6 +413,16 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 		// policy (PR #3736 follow-up).
 		const titleSystemPromptSource = discoverTitleSystemPromptFile(cwd);
 		const titleSystemPrompt = await resolvePromptInput(titleSystemPromptSource, "title system prompt");
+		const eventBus = new EventBus();
+		const trustedExtensions =
+			args.parsedArgs.trustedExtensions && args.parsedArgs.trustedExtensions.length > 0
+				? await loadTrustedSessionExtensions(args.baseOptions, cwd, eventBus)
+				: undefined;
+		if (trustedExtensions && trustedExtensions.errors.length > 0) {
+			throw new Error(
+				`Trusted extension failed to load: ${trustedExtensions.errors.map(item => item.error).join("; ")}`,
+			);
+		}
 		const { session: nextSession } = await args.createSession({
 			...args.baseOptions,
 			cwd,
@@ -398,6 +436,8 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			deferUsageReserveConfirmation: true,
 			enableMCP: false,
 			titleSystemPrompt,
+			eventBus,
+			preloadedExtensions: trustedExtensions,
 		});
 		if (args.parsedArgs.apiKey && !args.baseOptions.model && nextSession.model) {
 			args.authStorage.setRuntimeApiKey(nextSession.model.provider, args.parsedArgs.apiKey);
@@ -668,12 +708,39 @@ async function resolveScopedModels(
 	if (!modelPatterns || modelPatterns.length === 0) {
 		return [];
 	}
+	await refreshMissingScopedModelProviders(modelPatterns, modelRegistry, activeSettings);
 	return await resolveModelScope(
 		modelPatterns,
 		modelRegistry,
 		getModelMatchPreferences(activeSettings),
 		activeSettings,
 	);
+}
+
+/**
+ * Load a configured provider's cached/dynamic catalog before resolving an
+ * explicit model scope. Credential-scoped providers such as GitLab Duo cannot
+ * safely use an unscoped startup cache, so their advertised models may be
+ * absent until the first provider refresh even when `omp models refresh`
+ * populated the correct account-specific cache in a previous process.
+ */
+export async function refreshMissingScopedModelProviders(
+	patterns: readonly string[],
+	modelRegistry: Pick<ModelRegistry, "getAvailable" | "refreshProvider">,
+	activeSettings?: Settings,
+): Promise<void> {
+	const refreshedProviders = new Set<string>();
+	for (const pattern of patterns) {
+		if (filterAvailableModelsByEnabledPatterns(modelRegistry.getAvailable(), [pattern], activeSettings).length > 0) {
+			continue;
+		}
+		const slashIndex = pattern.indexOf("/");
+		if (slashIndex <= 0) continue;
+		const provider = pattern.slice(0, slashIndex);
+		if (provider === "pi" || /[*?[\]]/.test(provider) || refreshedProviders.has(provider)) continue;
+		refreshedProviders.add(provider);
+		await modelRegistry.refreshProvider(provider);
+	}
 }
 
 async function getChangelogForDisplay(
@@ -1000,11 +1067,12 @@ export async function buildSessionOptions(
 	if (parsed.noPrewalk && (parsed.prewalk || parsed.prewalkInto !== undefined)) {
 		throw new Error("--no-prewalk cannot be combined with --prewalk or --prewalk-into");
 	}
+	const explicitPrewalk = parsed.prewalk === true || parsed.prewalkInto !== undefined;
 	const prewalkEnabled = parsed.noPrewalk
 		? false
-		: parsed.prewalk === true || parsed.prewalkInto !== undefined
+		: explicitPrewalk
 			? true
-			: activeSettings.get("prewalk.enabled");
+			: !restoringSession && activeSettings.get("prewalk.enabled");
 	if (prewalkEnabled) {
 		const rolePattern = expandRoleAlias(parsed.prewalkInto ?? DEFAULT_PREWALK_TARGET, activeSettings);
 		const resolved = resolveCliModel({ cliModel: rolePattern, modelRegistry, preferences: modelMatchPreferences });
@@ -1114,14 +1182,34 @@ export async function buildSessionOptions(
 		options.rules = [];
 	}
 
-	// Additional extension paths from CLI
-	const cliExtensionPaths = [...(parsed.extensions ?? []), ...(parsed.hooks ?? [])];
-	if (cliExtensionPaths.length > 0) {
-		options.additionalExtensionPaths = cliExtensionPaths;
-	}
-
-	if (parsed.noExtensions) {
+	// Trusted extension paths are an exact allowlist for extension modules.
+	if (parsed.trustedExtensions && parsed.trustedExtensions.length > 0) {
+		const trustedPaths = parsed.trustedExtensions.map(trustedPath => {
+			let resolvedPath: string;
+			let stat: fsSync.Stats;
+			try {
+				resolvedPath = fsSync.realpathSync.native(trustedPath);
+				stat = fsSync.statSync(resolvedPath);
+			} catch {
+				throw new Error(`Trusted extension must be an existing module file: ${trustedPath}`);
+			}
+			if (!stat.isFile()) {
+				throw new Error(`Trusted extension must be a module file, not a directory: ${trustedPath}`);
+			}
+			return resolvedPath;
+		});
 		options.disableExtensionDiscovery = true;
+		options.additionalExtensionPaths = trustedPaths;
+	} else {
+		// Additional extension paths from CLI
+		const cliExtensionPaths = [...(parsed.extensions ?? []), ...(parsed.hooks ?? [])];
+		if (cliExtensionPaths.length > 0) {
+			options.additionalExtensionPaths = cliExtensionPaths;
+		}
+
+		if (parsed.noExtensions) {
+			options.disableExtensionDiscovery = true;
+		}
 	}
 
 	return options;
@@ -1194,16 +1282,20 @@ export async function runRootCommand(
 	// warning before we reach the await site below.
 	pluginPreloadPromise.catch(() => {});
 
-	// Register CLI-provided extension package paths (`--extension`, `--hook`) so
-	// the `omp-plugins` discovery provider can surface their `skills/`, `hooks/`,
-	// `tools/`, `commands/`, `rules/`, `prompts/`, and `.mcp.json` sub-trees.
-	// Explicit roots remain authorized under `--no-extensions`; only ambient
-	// extension discovery is disabled.
-	const cliExtensions = [...(parsedArgs.extensions ?? []), ...(parsedArgs.hooks ?? [])];
-	injectOmpExtensionCliRoots(cliExtensions, home, getProjectDir(), {
-		mode: parsedArgs.noExtensions ? "explicit-only" : "merge",
-		replace: true,
-	});
+	// Trusted files load as exact module paths, never as package roots whose
+	// sibling hooks/tools/commands/MCP content could be discovered implicitly.
+	if (!parsedArgs.trustedExtensions?.length) {
+		// Register CLI-provided extension package paths (`--extension`, `--hook`) so
+		// the `omp-plugins` discovery provider can surface their `skills/`, `hooks/`,
+		// `tools/`, `commands/`, `rules/`, `prompts/`, and `.mcp.json` sub-trees.
+		// Explicit roots remain authorized under `--no-extensions`; only ambient
+		// extension discovery is disabled.
+		const cliExtensions = [...(parsedArgs.extensions ?? []), ...(parsedArgs.hooks ?? [])];
+		injectOmpExtensionCliRoots(cliExtensions, home, getProjectDir(), {
+			mode: parsedArgs.noExtensions ? "explicit-only" : "merge",
+			replace: true,
+		});
+	}
 
 	let cwd = getProjectDir();
 	// Classify the host before opening auth or settings storage so every
@@ -1542,12 +1634,14 @@ export async function runRootCommand(
 		// string-flag value such as `--target @notes.md` is the flag's value, not a
 		// file — and the same result is handed to createAgentSession via
 		// `preloadedExtensions` so the discovery work is not repeated.
-		if (isInteractive) {
+		if (isInteractive && !parsedArgs.trustedExtensions?.length) {
 			sessionOptions.extensions = [...(sessionOptions.extensions ?? []), createWarpEventBridgeExtension()];
 		}
 
 		const eventBus = new EventBus();
-		const extensionsResult = await loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus);
+		const extensionsResult = parsedArgs.trustedExtensions?.length
+			? await loadTrustedSessionExtensions(sessionOptions, cwd, eventBus)
+			: await loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus);
 		const extensionFlagSink: ExtensionFlagSink = {
 			getFlags: () => ExtensionRunner.aggregateFlags(extensionsResult.extensions),
 			setFlagValue: (name, value) => {
@@ -1556,6 +1650,11 @@ export async function runRootCommand(
 		};
 		const initialArgs = applyExtensionFlags(extensionFlagSink, rawArgs) ?? parsedArgs;
 		normalizeContinueSessionArgs(initialArgs, rawArgs);
+		if ((parsedArgs.trustedExtensions?.length ?? 0) > 0 && extensionsResult.errors.length > 0) {
+			throw new Error(
+				`Trusted extension failed to load: ${extensionsResult.errors.map(item => item.error).join("; ")}`,
+			);
+		}
 		for (const message of formatExtensionLoadNotifications(extensionsResult.errors)) {
 			if (isInteractive) {
 				notifs.push({ kind: "warn", message });

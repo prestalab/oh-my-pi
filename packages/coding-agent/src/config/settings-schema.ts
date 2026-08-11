@@ -5198,6 +5198,25 @@ export const SETTINGS_SCHEMA = {
 				"Use a small model to detect when the assistant says it will continue but stops without tool calls; automatically prompt it to continue.",
 		},
 	},
+	"features.unexpectedStopTimeoutSeconds": {
+		type: "number",
+		default: 30,
+		ui: {
+			tab: "interaction",
+			group: "Agent",
+			label: "Unexpected Stop Timeout",
+			description:
+				"Maximum time to wait for the unexpected-stop classifier. Active Goal Mode bypasses this classifier and uses its own continuation loop.",
+			condition: "unexpectedStopDetection",
+			options: [
+				{ value: "5", label: "5 seconds" },
+				{ value: "10", label: "10 seconds" },
+				{ value: "20", label: "20 seconds" },
+				{ value: "30", label: "30 seconds", description: "Default." },
+				{ value: "60", label: "60 seconds" },
+			],
+		},
+	},
 	"providers.unexpectedStopModel": {
 		type: "enum",
 		values: TINY_MEMORY_MODEL_VALUES,
@@ -5408,17 +5427,11 @@ export const SETTINGS_SCHEMA = {
 	"exa.enabled": {
 		type: "boolean",
 		default: true,
-		ui: { tab: "providers", group: "Services", label: "Exa", description: "Master toggle for all Exa search tools" },
-	},
-
-	"exa.enableSearch": {
-		type: "boolean",
-		default: true,
 		ui: {
 			tab: "providers",
 			group: "Services",
-			label: "Exa Search",
-			description: "Enable Exa basic search, deep search, code search, and crawl tools",
+			label: "Exa",
+			description: "Enable the Exa web search provider",
 		},
 	},
 
@@ -5430,28 +5443,6 @@ export const SETTINGS_SCHEMA = {
 			group: "Services",
 			label: "Exa Search Delay",
 			description: "Minimum delay between Exa web search requests in milliseconds; set 0 to disable pacing",
-		},
-	},
-
-	"exa.enableResearcher": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Exa Researcher",
-			description: "Enable the Exa researcher tool for AI-powered deep research",
-		},
-	},
-
-	"exa.enableWebsets": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Exa Websets",
-			description: "Enable Exa webset management and enrichment tools",
 		},
 	},
 
@@ -5794,10 +5785,7 @@ export interface TtsrSettings {
 
 export interface ExaSettings {
 	enabled: boolean;
-	enableSearch: boolean;
 	searchDelayMs: number;
-	enableResearcher: boolean;
-	enableWebsets: boolean;
 }
 
 export interface StatusLineSettings {

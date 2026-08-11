@@ -25,4 +25,6 @@ Before calling `goal({op:"complete"})`, you MUST perform a completion audit agai
 
 Call `goal({op:"complete"})` only when every deliverable has direct, current-state evidence proving it is satisfied. The completion call is a load-bearing claim; it ends the autonomous loop and surfaces a "done" report to the user.
 
-If the work is not done, just keep working. NEVER narrate that you are continuing — execute.
+This continuation requires a tool call. Select the next concrete action and execute it. If every deliverable is
+already verified, call `goal({op:"complete"})`; otherwise call a work, inspection, verification, or `ask` tool.
+Do not repeat or paraphrase your previous intention, and do not answer with narration-only text.

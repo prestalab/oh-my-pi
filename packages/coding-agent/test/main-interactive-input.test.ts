@@ -140,7 +140,7 @@ describe("submitInteractiveInput", () => {
 				display: false,
 				attribution: "agent",
 			},
-			{ streamingBehavior: "followUp" },
+			{ streamingBehavior: "followUp", toolChoice: "required" },
 		);
 		expect(mode.finishPendingSubmission).toHaveBeenCalledWith(input);
 		expect(mode.showError).not.toHaveBeenCalled();
@@ -213,7 +213,7 @@ describe("submitInteractiveInput", () => {
 				display: false,
 				attribution: "agent",
 			},
-			{ streamingBehavior: "followUp" },
+			{ streamingBehavior: "followUp", toolChoice: "required" },
 		);
 		expect(mode.finishPendingSubmission).toHaveBeenCalledWith(input);
 		expect(mode.showError).not.toHaveBeenCalled();

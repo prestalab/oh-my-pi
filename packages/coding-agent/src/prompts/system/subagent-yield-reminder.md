@@ -11,6 +11,7 @@ This run crossed its request budget and the in-flight turn was stopped. This is 
 Your last turn ended without a tool call, so the session went idle. This is reminder {{retryCount}} of {{maxRetries}}.
 
 Every turn MUST end with a tool call. Pick the first that applies:
+If normal structured tool controls are hidden and the provider system prompt defines the `xd:tool_call` plaintext fallback, emit that exact fallback. Never report that tools are unavailable instead.
 1. **Resume the work** — if the assignment is not finished and you are not recording an incremental section, call the next tool you would have called (edit, write, bash, search, etc.). NEVER treat this reminder as a forced stop.
 2. **Yield an incremental section** — only when useful for the assignment: call `yield` with non-empty `type: string[]`; matching sections accumulate and the task continues.
 3. **Yield with success** — only if the assignment is genuinely complete: call terminal `yield`. Omit `type` for the single final structured result in `result.data`; use `type: string` to finalize from the last assistant turn when data is omitted.

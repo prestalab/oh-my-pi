@@ -52,7 +52,7 @@ import {
 	prompt,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
-import chalk from "chalk";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "../capability";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
@@ -571,9 +571,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	#vibeModeOwnerScope: VibeOwnerScope | undefined;
 	#vibeScopeSuspendedForSwitch = false;
 	#goalContinuationTimer: NodeJS.Timeout | undefined;
-	#goalTurnHadToolCalls = false;
-	#goalContinuationTurnInFlight = false;
-	#goalSuppressNextContinuation = false;
 	#planModePreviousModelState: { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined;
 	#pendingModelSwitch: { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined;
 	/** Whether #pendingModelSwitch was queued by the live plan-role reconciler. */
@@ -1376,7 +1373,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!this.session.settings.get("goal.continuationModes").includes("interactive")) return;
 		if (this.planModeEnabled || this.planModePaused) return;
 		if (!this.goalModeEnabled || this.goalModePaused) return;
-		if (this.#goalSuppressNextContinuation) return;
 		if (this.#pendingSubmittedInput) return;
 		if (this.editor.getText().trim().length > 0) return;
 		if ((this.editor.pendingImages?.length ?? 0) > 0) return;
@@ -1401,7 +1397,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			if ((this.editor.pendingImages?.length ?? 0) > 0) return;
 			const latestState = this.session.getGoalModeState();
 			if (!latestState?.enabled || latestState.goal.status !== "active") return;
-			this.#goalContinuationTurnInFlight = true;
 			this.onInputCallback(
 				this.startPendingSubmission({
 					text: prompt,
@@ -1604,7 +1599,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 		this.#pendingSubmittedInput = submission;
 		if (!submission.customType) {
-			this.#resetGoalContinuationSuppression();
 			const imageCount = submission.images?.length ?? 0;
 			this.optimisticUserMessageSignature = `${submission.text}\u0000${imageCount}`;
 			this.#pendingSubmissionDispose = this.recordLocalSubmission(submission.text, imageCount);
@@ -1639,9 +1633,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#pendingSubmittedInput = undefined;
 		this.clearOptimisticUserMessage();
 		this.#pendingWorkingMessage = undefined;
-		if (submission.customType === "goal-continuation") {
-			this.#goalContinuationTurnInFlight = false;
-		}
 		if (this.loadingAnimation) {
 			this.#stopLoadingAnimation(true);
 		}
@@ -1677,10 +1668,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#pendingSubmittedInput = undefined;
 			this.#pendingSubmissionDispose = undefined;
 		}
-		if (input.customType === "goal-continuation") {
-			this.#goalContinuationTurnInFlight = false;
-		}
-
 		if (wasPendingSubmission && !this.session.isStreaming && !this.streamingComponent) {
 			this.optimisticUserMessageSignature = undefined;
 			pendingSubmissionDispose?.();
@@ -2257,10 +2244,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.requestRender();
 	}
 
-	#resetGoalContinuationSuppression(): void {
-		this.#goalSuppressNextContinuation = false;
-	}
-
 	#getPausedGoalState(): GoalModeState | undefined {
 		const state = this.session.getGoalModeState();
 		if (!state?.goal || state.enabled || state.goal.status !== "paused") {
@@ -2298,19 +2281,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async #handleGoalSessionEvent(event: AgentSessionEvent): Promise<void> {
 		if (event.type === "agent_start") {
-			this.#goalTurnHadToolCalls = false;
 			this.#cancelGoalContinuation();
-			return;
-		}
-		if (event.type === "tool_execution_start") {
-			this.#goalTurnHadToolCalls = true;
-			if (!this.#goalContinuationTurnInFlight) {
-				this.#resetGoalContinuationSuppression();
-			}
-			return;
-		}
-		if (event.type === "message_start" && event.message.role === "user" && !event.message.synthetic) {
-			this.#resetGoalContinuationSuppression();
 			return;
 		}
 		if (event.type === "goal_updated") {
@@ -2330,10 +2301,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (event.type !== "agent_end") {
 			return;
-		}
-		if (this.#goalContinuationTurnInFlight) {
-			this.#goalSuppressNextContinuation = !this.#goalTurnHadToolCalls;
-			this.#goalContinuationTurnInFlight = false;
 		}
 		if (this.session.getGoalModeState()?.mode === "exiting") {
 			await this.#exitGoalMode({ reason: "completed", silent: true });
@@ -2463,9 +2430,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.goalModeEnabled = false;
 			this.goalModePaused = false;
 			this.#goalModePreviousTools = undefined;
-			this.#goalTurnHadToolCalls = false;
-			this.#goalContinuationTurnInFlight = false;
-			this.#goalSuppressNextContinuation = false;
 			this.#cancelGoalContinuation();
 			this.#updateGoalModeStatus();
 		}
@@ -2755,7 +2719,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.session.setActiveToolsByName(goalTools);
 		this.session.setGoalModeState(state);
 		this.goalModeEnabled = true;
-		this.#resetGoalContinuationSuppression();
 		this.#updateGoalModeStatus();
 		if (this.session.isStreaming) {
 			await this.session.sendGoalModeContext({ deliverAs: "steer" });
@@ -2788,7 +2751,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.goalModeEnabled = false;
 		this.goalModePaused = options?.paused ?? false;
 		this.#goalModePreviousTools = undefined;
-		this.#goalContinuationTurnInFlight = false;
 		this.#cancelGoalContinuation();
 		this.#updateGoalModeStatus();
 		if (!options?.silent) {
@@ -3429,7 +3391,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			nextBudget = parsed;
 		}
 		await this.session.goalRuntime.onBudgetMutated(nextBudget);
-		this.#resetGoalContinuationSuppression();
 		this.#scheduleGoalContinuation();
 		this.showStatus(nextBudget === undefined ? "Goal budget cleared." : `Goal budget set to ${nextBudget}.`);
 	}
@@ -3667,7 +3628,6 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async #startGoalFromObjective(objective: string): Promise<void> {
 		await this.#enterGoalMode({ objective, silent: true });
-		this.#resetGoalContinuationSuppression();
 		if (!this.session.isStreaming && this.onInputCallback) {
 			this.onInputCallback(this.startPendingSubmission({ text: objective }));
 		}
@@ -3678,7 +3638,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.session.setGoalModeState(state);
 		this.goalModeEnabled = true;
 		this.goalModePaused = false;
-		this.#resetGoalContinuationSuppression();
 		this.#updateGoalModeStatus();
 		if (this.session.isStreaming) {
 			await this.session.sendGoalModeContext({ deliverAs: "steer" });
@@ -4141,7 +4100,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.requestRender();
 	}
 
-	/** Defer transcript command panels until the active turn can no longer grow above them. */
+	/**
+	 * Defer transcript command panels while the agent is streaming, then mount
+	 * them at the next settle, terminal or not. A non-terminal settle is only a
+	 * scheduling pause, so resumed streaming can still land below a panel
+	 * flushed there. That is preferred over leaving it queued behind a command
+	 * the user runs during the pause, which mounts immediately and would put the
+	 * older panel out of order.
+	 */
 	presentCommandOutput(content: Component | readonly Component[]): void {
 		if (!this.session.isStreaming) {
 			this.present(content);
@@ -4154,6 +4120,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#pendingCommandOutputSessionId = sessionId;
 		const items = Array.isArray(content) ? content : [content as Component];
 		this.#pendingCommandOutput.push(...items);
+		// No feedback here on purpose: mounting anything into the transcript
+		// mid-turn (even a status line) re-renders rows below the growing live
+		// block and duplicates them in native scrollback — the exact regression
+		// issues #4806/#6767 pin. The queue flushes at the next settle.
 	}
 
 	/** Mount every command panel queued for the current session while the agent was streaming. */

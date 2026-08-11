@@ -34,20 +34,60 @@ export interface ClassifyUnexpectedStopDeps {
 
 export function isUnexpectedStopCandidate(message: AssistantMessage): boolean {
 	if (message.stopReason !== "stop") return false;
-	let hasText = false;
+	let hasContent = false;
 	for (const content of message.content) {
 		if (content.type === "toolCall") return false;
 		if (content.type === "text" && /\S/.test(content.text)) {
-			hasText = true;
+			hasContent = true;
+		}
+		// A signed thinking-only stop is still a candidate: reasoning models can
+		// trap the intended response (or a truncated fragment) in a thinking block
+		// with no text. #isEmptyAssistantStop treats a non-whitespace signature as
+		// terminal (not empty), so such stops bypass the empty-stop path entirely.
+		// Match that predicate here — unsigned thinking-only stops stay with the
+		// empty-stop retry path (and its cap) rather than being re-handled here.
+		if (content.type === "thinking" && /\S/.test(content.thinking) && /\S/.test(content.thinkingSignature ?? "")) {
+			hasContent = true;
 		}
 	}
-	return hasText;
+	return hasContent;
+}
+
+/**
+ * Catch deterministic stop failures locally. These are not questions for a
+ * model classifier: the assistant either explicitly claims that its tool
+ * channel is unavailable, or emits only a short promise to act and then stops.
+ * Keeping this narrow avoids retrying ordinary completed answers.
+ */
+export function classifyObviousUnexpectedStop(text: string): true | undefined {
+	const trimmed = text.trim();
+	if (!trimmed) return undefined;
+
+	const explicitToolRefusal =
+		/(?:(?:не могу|не удалось) (?:продолжить|выполнить|завершить)[\s\S]{0,500}(?:инструмент|транспорт|интерфейс|agent:\/\/|вызв|вызов|\b(?:task|glob|grep|read|write|edit|bash)\b|канал(?:а)? вызова)|(?:продолжу|продолжить)[\s\S]{0,150}(?:после|при)[\s\S]{0,150}(?:восстановлени[яи]|появлени[яи])[\s\S]{0,100}(?:доступа к инструментам|инструмент)|(?:интерфейс|сессия)[\s\S]{0,250}(?:не предоставил[а]?|не позволяет)[\s\S]{0,150}(?:инструмент|вызвать|канал)|(?:tool(?:-call)?|tool invocation)[\s\S]{0,150}(?:unavailable|not available|no (?:working )?channel)|cannot continue[\s\S]{0,200}(?:tool|instrument))/iu;
+	if (explicitToolRefusal.test(trimmed)) return true;
+
+	const pendingAgentResult =
+		/(?:(?:scout|агент|задач)[\s\S]{0,100}(?:ещё|еще)\s+(?:выполняется|работает)|(?:ожидаю|жду)(?=\s)[\s\S]{0,120}(?:результат|доставк))/iu;
+	if (pendingAgentResult.test(trimmed)) return true;
+
+	const shortActionPromise =
+		/(?:^|[.!?]\s*)(?:сначала\s+)?(?:проверю|проверяю|изучу|изучаю|читаю|начинаю|исключаю|сопоставляю|ищу|открываю|запускаю|собираю|анализирую|генерирую|сгенерирую|создаю|создам|сделаю|выполню|закончу|доделаю|сохраняю|встраиваю|встрою|доделываю|завершаю|переношу|перенесу|обновляю|обновлю|продолжу|продолжаю|проведу|провожу|уточню|уточняю|сейчас\s+(?:выполню|проверю|исправлю|запущу|продолжу)|затем\s+(?:внесу|исправлю|запущу|проверю)|готова?\s+(?:продолжить|начать|выполнить)\s+(?:генерац|работ|провер|задач|действ|вызов|инструмент)\S*)(?=\s|[,:;.!?]|$)/iu;
+	const completionEvidence =
+		/(?:готово|заверш(?:ено|ил|ила)|исправлен[оа]?|результат(?:ы)?\s*:|тесты?\s+(?:проходят|пройден))/iu;
+	const actionPromiseMatch = trimmed.length <= 600 ? shortActionPromise.exec(trimmed) : null;
+	if (actionPromiseMatch && !completionEvidence.test(trimmed.slice(actionPromiseMatch.index))) return true;
+
+	return undefined;
 }
 
 export async function classifyUnexpectedStop(
 	text: string,
 	deps: ClassifyUnexpectedStopDeps,
 ): Promise<boolean | undefined> {
+	const obvious = classifyObviousUnexpectedStop(text);
+	if (obvious !== undefined) return obvious;
+
 	const backend = deps.settings.get("providers.unexpectedStopModel");
 	try {
 		if (backend === ONLINE_MEMORY_MODEL_KEY) {

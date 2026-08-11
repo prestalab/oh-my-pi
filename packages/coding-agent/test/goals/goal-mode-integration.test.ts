@@ -351,6 +351,34 @@ describe("InteractiveMode goal mode integration", () => {
 		await waiter.inputPromise;
 	});
 
+	it("continues an active goal after a tool-free continuation turn", async () => {
+		await harness.mode.init({ suppressWelcomeIntro: true });
+		await harness.mode.handleGoalModeCommand("Ship the release");
+
+		vi.useFakeTimers();
+		const firstInputPromise = harness.mode.getUserInput();
+		await waitForMicrotasks();
+		vi.advanceTimersByTime(800);
+		const firstInput = await firstInputPromise;
+		expect(firstInput.customType).toBe("goal-continuation");
+
+		// Reproduce the observed failure mode: the automatic continuation
+		// completes without any tool call while the goal itself remains active.
+		// A prior suppression flag treated that single turn as a reason to stop
+		// scheduling goal work permanently.
+		harness.session.agent.emitExternalEvent({ type: "agent_start" });
+		harness.session.agent.emitExternalEvent({ type: "agent_end", messages: [] });
+		await harness.session.waitForIdle();
+		harness.mode.finishPendingSubmission(firstInput);
+
+		const secondWaiter = await armInputWaiter(harness.mode);
+		vi.advanceTimersByTime(800);
+		await waitForMicrotasks();
+
+		expect(secondWaiter.getResolvedText()).toContain("Ship the release");
+		await secondWaiter.inputPromise;
+	});
+
 	it("refuses /goal while plan mode is active", async () => {
 		const showWarning = vi.spyOn(harness.mode, "showWarning");
 		harness.mode.planModeEnabled = true;

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
 import { isContextOverflow } from "@oh-my-pi/pi-ai/error";
 import {
 	buildGitLabDuoWorkflowApprovalStartRequest,
@@ -41,7 +42,6 @@ import type {
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
-import { z } from "zod/v4";
 
 beforeAll(() => configureCredentialRedaction(true));
 afterAll(() => configureCredentialRedaction(false));
@@ -67,13 +67,13 @@ const context: Context = {
 const editTool: Tool = {
 	name: "edit",
 	description: "Apply a hashline patch.",
-	parameters: z.object({ input: z.string() }),
+	parameters: type({ input: type("string") }),
 };
 
 const nativeTools: Tool[] = ["read", "write", "grep", "glob", "bash", "lsp", "todo"].map(name => ({
 	name,
 	description: `${name} native bridge`,
-	parameters: z.object({}),
+	parameters: type({}),
 }));
 
 function restoreOptionalEnv(name: string, value: string | undefined): void {
@@ -292,8 +292,44 @@ describe("GitLab Duo Workflow provider protocol", () => {
 		// A single-turn goal is bare text (no ChatML markers), so the history-note that
 		// warns against mimicking transcript markers must NOT be appended.
 		expect(prompt?.prompt_template.system).not.toContain("written as a plain-text log");
+		expect(prompt?.prompt_template.system).not.toContain("xd:tool_call");
 	});
 
+	it("advertises the explicit plaintext tool fallback when MCP tools are attached", () => {
+		const systemContext: Context = {
+			systemPrompt: ["OMP authoritative operating rules. Bridge the local tools."],
+			messages: context.messages,
+		};
+		const payload = buildGitLabDuoWorkflowStartRequest("workflow-1", model, systemContext, [nativeTools[0]!]);
+		const agent = payload.flowConfig?.components[0];
+		const prompt = payload.flowConfig?.prompts.find(entry => entry.prompt_id === agent?.prompt_id);
+
+		expect(prompt?.prompt_template.system).toContain("GitLab Duo tool-call transport fallback");
+		expect(prompt?.prompt_template.system).toContain("Never claim that tools are unavailable");
+		expect(prompt?.prompt_template.system).toContain("xd:tool_call");
+		expect(prompt?.prompt_template.system).toContain('{"tool":"read","args":');
+	});
+
+	it("carries required tool choice into the inline flow system slot", () => {
+		const systemContext: Context = {
+			systemPrompt: ["OMP authoritative operating rules. Bridge the local tools."],
+			messages: context.messages,
+		};
+		const payload = buildGitLabDuoWorkflowStartRequest(
+			"workflow-1",
+			model,
+			systemContext,
+			[nativeTools[0]!],
+			undefined,
+			{ toolChoice: "required" },
+		);
+		const agent = payload.flowConfig?.components[0];
+		const prompt = payload.flowConfig?.prompts.find(entry => entry.prompt_id === agent?.prompt_id);
+
+		expect(prompt?.prompt_template.system).toContain("Required tool action");
+		expect(prompt?.prompt_template.system).toContain("MUST issue at least one attached tool call");
+		expect(prompt?.prompt_template.system).toContain("xd:tool_call");
+	});
 	it("always emits the inline ambient flowConfig (no server-side registry path)", () => {
 		const payload = buildGitLabDuoWorkflowStartRequest("workflow-1", model, context);
 		expect(payload.workflowDefinition).toBe("ambient");
@@ -3123,6 +3159,112 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 			startRequest: { workflowID: "workflow-1", goal: "Help me update the code." },
 		});
 		expect(output.content).toEqual([{ type: "text", text: "OK" }]);
+	});
+
+	it("recovers an explicitly marked plaintext call for an advertised MCP tool", async () => {
+		const fallback = 'xd:tool_call\n{"tool":"read","args":{"path":"/tmp/probe.txt"}}';
+		for (const content of [fallback, `I will inspect the project.${fallback}`]) {
+			let closed = false;
+			const socket: GitLabDuoWorkflowWebSocketLike = {
+				onopen: null,
+				onmessage: null,
+				onerror: null,
+				onclose: null,
+				send() {},
+				close() {
+					closed = true;
+				},
+			};
+			const output: AssistantMessage = {
+				role: "assistant",
+				content: [],
+				api: "gitlab-duo-agent",
+				provider: "gitlab-duo-agent",
+				model: model.id,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+			};
+			const stream = new AssistantMessageEventStream();
+			const streamPromise = runGitLabDuoWorkflowSocket(
+				socket,
+				buildGitLabDuoWorkflowStartRequest("workflow-1", model, context, [nativeTools[0]!]),
+				{ stream, output, started: true },
+				{ apiKey: "redacted" },
+			);
+			socket.onopen?.(new Event("open"));
+			socket.onmessage?.(terminalGitLabDuoWorkflowMessage(content));
+
+			const result = await streamPromise;
+			const finalOutput = await stream.result();
+			expect(result).toBe("terminal");
+			expect(closed).toBe(true);
+			expect(finalOutput.stopReason).toBe("toolUse");
+			expect(finalOutput.content).toContainEqual({
+				type: "toolCall",
+				id: expect.stringMatching(/^ptc_/),
+				name: "read",
+				arguments: { path: "/tmp/probe.txt" },
+				rawBlock: fallback,
+			});
+		}
+	});
+
+	it("recovers a marked mounted-tool call for host fallback resolution", async () => {
+		const socket: GitLabDuoWorkflowWebSocketLike = {
+			onopen: null,
+			onmessage: null,
+			onerror: null,
+			onclose: null,
+			send() {},
+			close() {},
+		};
+		const output: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: "gitlab-duo-agent",
+			provider: "gitlab-duo-agent",
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+		const stream = new AssistantMessageEventStream();
+		const streamPromise = runGitLabDuoWorkflowSocket(
+			socket,
+			buildGitLabDuoWorkflowStartRequest("workflow-1", model, context, [nativeTools[0]!]),
+			{ stream, output, started: true },
+			{ apiKey: "redacted" },
+		);
+		socket.onopen?.(new Event("open"));
+		const fallback = 'xd:tool_call\n{"tool":"browser","args":{"action":"open","url":"file:///tmp/index.html"}}';
+		socket.onmessage?.(terminalGitLabDuoWorkflowMessage(fallback));
+
+		const result = await streamPromise;
+		const finalOutput = await stream.result();
+		expect(result).toBe("terminal");
+		expect(finalOutput.stopReason).toBe("toolUse");
+		expect(finalOutput.content).toContainEqual({
+			type: "toolCall",
+			id: expect.stringMatching(/^ptc_/),
+			name: "browser",
+			arguments: { action: "open", url: "file:///tmp/index.html" },
+			rawBlock: fallback,
+		});
 	});
 
 	it("renders procedural agent checkpoints as text, matching the official chat client", async () => {

@@ -133,6 +133,7 @@ describe("task spawn routing", () => {
 		const jobId = result.details?.async?.jobId;
 		expect(jobId).toBeTruthy();
 		expect(text).toContain(`job \`${jobId}\``);
+		expect(text).toContain("Do not read `agent://<id>` while its job is still running");
 		const job = manager.getJob(jobId!);
 		expect(job?.status).toBe("running");
 		expect(job?.resultText).toBeUndefined();
