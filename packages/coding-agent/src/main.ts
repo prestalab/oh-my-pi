@@ -34,6 +34,7 @@ import { ModelRegistry } from "./config/model-registry";
 import {
 	DEFAULT_PREWALK_TARGET,
 	expandRoleAlias,
+	filterAvailableModelsByEnabledPatterns,
 	getModelMatchPreferences,
 	resolveCliModel,
 	resolveModelRoleValue,
@@ -701,12 +702,39 @@ async function resolveScopedModels(
 	if (!modelPatterns || modelPatterns.length === 0) {
 		return [];
 	}
+	await refreshMissingScopedModelProviders(modelPatterns, modelRegistry, activeSettings);
 	return await resolveModelScope(
 		modelPatterns,
 		modelRegistry,
 		getModelMatchPreferences(activeSettings),
 		activeSettings,
 	);
+}
+
+/**
+ * Load a configured provider's cached/dynamic catalog before resolving an
+ * explicit model scope. Credential-scoped providers such as GitLab Duo cannot
+ * safely use an unscoped startup cache, so their advertised models may be
+ * absent until the first provider refresh even when `omp models refresh`
+ * populated the correct account-specific cache in a previous process.
+ */
+export async function refreshMissingScopedModelProviders(
+	patterns: readonly string[],
+	modelRegistry: Pick<ModelRegistry, "getAvailable" | "refreshProvider">,
+	activeSettings?: Settings,
+): Promise<void> {
+	const refreshedProviders = new Set<string>();
+	for (const pattern of patterns) {
+		if (filterAvailableModelsByEnabledPatterns(modelRegistry.getAvailable(), [pattern], activeSettings).length > 0) {
+			continue;
+		}
+		const slashIndex = pattern.indexOf("/");
+		if (slashIndex <= 0) continue;
+		const provider = pattern.slice(0, slashIndex);
+		if (provider === "pi" || /[*?[\]]/.test(provider) || refreshedProviders.has(provider)) continue;
+		refreshedProviders.add(provider);
+		await modelRegistry.refreshProvider(provider);
+	}
 }
 
 async function getChangelogForDisplay(

@@ -577,13 +577,19 @@ function parseModelRef(value: unknown): GitLabDuoWorkflowModelRef | null {
 }
 
 function resolveModelRefs(availability: GitLabDuoWorkflowAvailability): readonly GitLabDuoWorkflowModelRef[] {
-	if (availability.pinnedModel) {
-		return [availability.pinnedModel];
-	}
-	if (availability.selectableModels.length > 0) {
-		return availability.selectableModels;
-	}
-	return availability.defaultModel ? [availability.defaultModel] : [];
+	const advertisedModels =
+		availability.selectableModels.length > 0
+			? availability.selectableModels
+			: availability.defaultModel
+				? [availability.defaultModel]
+				: [];
+	const candidates = availability.pinnedModel ? [availability.pinnedModel, ...advertisedModels] : advertisedModels;
+	const seen = new Set<string>();
+	return candidates.filter(model => {
+		if (seen.has(model.ref)) return false;
+		seen.add(model.ref);
+		return true;
+	});
 }
 
 function extractExplicitRootNamespaceId(value: unknown): string | null {

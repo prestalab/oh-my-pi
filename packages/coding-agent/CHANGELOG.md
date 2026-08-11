@@ -169,6 +169,9 @@
 - Fixed install.sh falsely reporting success on musl-based systems (such as Alpine Linux) when the binary fails to start; the installer now smoke-tests the binary, exits non-zero on failure, and provides remediation steps.
 - Fixed Codex config.toml discovery incorrectly importing MCP servers that are configured with enabled = false.
 - Fixed bash.patterns allow rules rejecting valid commands when quoted arguments contained shell metacharacters (such as Cargo benchmark regex filters).
+### Fixed
+
+- Fixed explicit model scopes reporting configured GitLab Duo models as unknown during startup by refreshing a missing credential-scoped provider before resolving the enabled model list.
 
 ## [17.2.6] - 2026-08-03
 

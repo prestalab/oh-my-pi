@@ -468,12 +468,15 @@ describe("GitLab Duo Workflow discovery", () => {
 		expect(graphqlRootIds).toEqual(["no-models", "empty-models", "usable-models"]);
 	});
 
-	it("uses pinnedModel instead of selectableModels and defaultModel", async () => {
+	it("keeps selectable models visible when GitLab also returns a pinned model", async () => {
 		const { fetch } = createMockFetch({
 			models: {
 				root: {
 					defaultModel: { name: "Default Model", ref: "default_ref" },
-					selectableModels: [{ name: "Selectable Model", ref: "selectable_ref" }],
+					selectableModels: [
+						{ name: "Pinned Model", ref: "pinned_ref" },
+						{ name: "Selectable Model", ref: "selectable_ref" },
+					],
 					pinnedModel: { name: "Pinned Model", ref: "pinned_ref" },
 				},
 			},
@@ -481,7 +484,7 @@ describe("GitLab Duo Workflow discovery", () => {
 
 		const models = await fetchGitLabDuoWorkflowModels({ apiKey: TEST_TOKEN, namespaceId: "root", fetch });
 
-		expect(models?.map(model => model.id)).toEqual(["pinned_ref"]);
+		expect(models?.map(model => model.id)).toEqual(["pinned_ref", "selectable_ref"]);
 		expect(models?.[0]).toMatchObject({
 			name: "Pinned Model",
 			api: "gitlab-duo-agent",
