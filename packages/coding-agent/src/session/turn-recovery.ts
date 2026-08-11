@@ -68,11 +68,25 @@ import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-
 
 const THINKING_LOOP_REDIRECT_TYPE = "thinking-loop-redirect";
 const UNEXPECTED_STOP_MAX_RETRIES = 3;
-const UNEXPECTED_STOP_TIMEOUT_MS = 4000;
+const UNEXPECTED_STOP_TIMEOUT_DEFAULT_SECONDS = 30;
+const UNEXPECTED_STOP_TIMEOUT_MIN_SECONDS = 1;
+const UNEXPECTED_STOP_TIMEOUT_MAX_SECONDS = 120;
 const EMPTY_STOP_MAX_RETRIES = 3;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
+
+/** Resolve the bounded classifier deadline from the user-visible setting. */
+export function resolveUnexpectedStopTimeoutMs(settings: Settings): number {
+	const configuredTimeoutSeconds = settings.get("features.unexpectedStopTimeoutSeconds");
+	const timeoutSeconds = Number.isFinite(configuredTimeoutSeconds)
+		? Math.min(
+				UNEXPECTED_STOP_TIMEOUT_MAX_SECONDS,
+				Math.max(UNEXPECTED_STOP_TIMEOUT_MIN_SECONDS, configuredTimeoutSeconds),
+			)
+		: UNEXPECTED_STOP_TIMEOUT_DEFAULT_SECONDS;
+	return timeoutSeconds * 1000;
+}
 
 function hasNonWhitespace(value: string): boolean {
 	return NON_WHITESPACE_RE.test(value);
@@ -110,6 +124,8 @@ export interface TurnRecoveryHost {
 	modelRegistry: ModelRegistry;
 	configWarnings: string[];
 	model(): Model | undefined;
+	/** Active Goal Mode owns terminal-stop continuation and must not wait for the semantic classifier. */
+	hasActiveGoal?(): boolean;
 	/** Whether streamed text has already been committed to the active output sink. */
 	textOutputCommitted(): boolean;
 	thinkingLevel(): ThinkingLevel | undefined;
@@ -627,6 +643,10 @@ export class TurnRecovery {
 		if (!this.#host.settings.get("features.unexpectedStopDetection")) {
 			return false;
 		}
+		if (this.#host.hasActiveGoal?.()) {
+			this.#unexpectedStopRetryCount = 0;
+			return false;
+		}
 		if (!isUnexpectedStopCandidate(assistantMessage)) {
 			this.#unexpectedStopRetryCount = 0;
 			return false;
@@ -650,7 +670,7 @@ export class TurnRecovery {
 		}
 
 		const controller = new AbortController();
-		const timeout = setTimeout(() => controller.abort(), UNEXPECTED_STOP_TIMEOUT_MS);
+		const timeout = setTimeout(() => controller.abort(), resolveUnexpectedStopTimeoutMs(this.#host.settings));
 		let classification: boolean | undefined;
 		try {
 			classification = await classifyUnexpectedStop(text, {

@@ -5198,6 +5198,25 @@ export const SETTINGS_SCHEMA = {
 				"Use a small model to detect when the assistant says it will continue but stops without tool calls; automatically prompt it to continue.",
 		},
 	},
+	"features.unexpectedStopTimeoutSeconds": {
+		type: "number",
+		default: 30,
+		ui: {
+			tab: "interaction",
+			group: "Agent",
+			label: "Unexpected Stop Timeout",
+			description:
+				"Maximum time to wait for the unexpected-stop classifier. Active Goal Mode bypasses this classifier and uses its own continuation loop.",
+			condition: "unexpectedStopDetection",
+			options: [
+				{ value: "5", label: "5 seconds" },
+				{ value: "10", label: "10 seconds" },
+				{ value: "20", label: "20 seconds" },
+				{ value: "30", label: "30 seconds", description: "Default." },
+				{ value: "60", label: "60 seconds" },
+			],
+		},
+	},
 	"providers.unexpectedStopModel": {
 		type: "enum",
 		values: TINY_MEMORY_MODEL_VALUES,

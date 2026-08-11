@@ -9,6 +9,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { resolveUnexpectedStopTimeoutMs } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
 import * as unexpectedStopClassifier from "@oh-my-pi/pi-coding-agent/session/unexpected-stop-classifier";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
 
@@ -218,6 +219,30 @@ describe("AgentSession unexpected stop guard", () => {
 		expect(spy).toHaveBeenCalledTimes(1);
 		expect(mock.calls).toHaveLength(1);
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
+	});
+
+	it("uses a configurable bounded classifier timeout instead of the old four-second cutoff", () => {
+		const defaults = Settings.isolated();
+		expect(resolveUnexpectedStopTimeoutMs(defaults)).toBe(30_000);
+
+		const configured = Settings.isolated({ "features.unexpectedStopTimeoutSeconds": 45 });
+		expect(resolveUnexpectedStopTimeoutMs(configured)).toBe(45_000);
+	});
+
+	it("lets active Goal Mode own continuation without classifier latency", async () => {
+		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(true);
+		const { session, mock } = await createHarness([unexpectedStop("I should inspect the remaining files now.")], {
+			"features.unexpectedStopDetection": true,
+			"providers.unexpectedStopModel": "online",
+		});
+		await session.goalRuntime.createGoal({ objective: "Finish the project" });
+
+		await session.prompt("start");
+		await session.waitForIdle();
+
+		expect(session.getGoalModeState()?.goal.status).toBe("active");
+		expect(spy).not.toHaveBeenCalled();
+		expect(mock.calls).toHaveLength(1);
 	});
 
 	it("caps unexpected stop retries at three attempts", async () => {
