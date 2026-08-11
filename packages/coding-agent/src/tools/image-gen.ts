@@ -29,6 +29,7 @@ import { ohMyPiXAIUserAgent, resolveXAIHttpCredentials } from "../lib/xai-http";
 import imageGenDescription from "../prompts/tools/image-gen.md" with { type: "text" };
 import { AUTO_IMAGE_PROVIDER_ORDER, type ImageProvider, isImageProviderId } from "./image-providers";
 import { resolveReadPath } from "./path-utils";
+import { ToolError } from "./tool-errors";
 
 const DEFAULT_MODEL = "gemini-3-pro-image-preview";
 const DEFAULT_OPENROUTER_MODEL = "google/gemini-3-pro-image-preview";
@@ -1170,19 +1171,16 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 
 						if (parsed.images.length === 0) {
 							const messageText = parsed.responseText ? `\n\n${parsed.responseText}` : "";
-							return {
-								content: [{ type: "text", text: `No image data returned.${messageText}` }],
-								details: {
-									provider,
-									model,
-									imageCount: 0,
-									imagePaths: [],
-									images: [],
-									responseText: parsed.responseText,
-									revisedPrompt: parsed.revisedPrompt,
-									usage: parsed.usage,
-								},
-							};
+							throw new ToolError(`No image data returned.${messageText}`, {
+								provider,
+								model,
+								imageCount: 0,
+								imagePaths: [],
+								images: [],
+								responseText: parsed.responseText,
+								revisedPrompt: parsed.revisedPrompt,
+								usage: parsed.usage,
+							});
 						}
 
 						const imagePaths = await saveImagesToTemp(parsed.images);

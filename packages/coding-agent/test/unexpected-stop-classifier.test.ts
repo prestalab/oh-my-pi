@@ -172,6 +172,27 @@ describe("classifyUnexpectedStop", () => {
 		).toBe(true);
 	});
 
+	it("recognizes an image-generation promise after an earlier status sentence", () => {
+		expect(
+			classifyObviousUnexpectedStop(
+				"Первый запрос отклонён генератором из-за защищённых персонажей. Генерирую эквивалентную оригинальную сцену без их имён.Генератор отклонил запрос, поэтому файл не создан. Могу сгенерировать оригинального тёмного рыцаря.",
+			),
+		).toBe(true);
+	});
+
+	it("recognizes a stopped ready-to-continue image-generation promise", () => {
+		expect(
+			classifyObviousUnexpectedStop(
+				"Готов продолжить генерацию фотореалистичной сцены с оригинальными персонажами.",
+			),
+		).toBe(true);
+	});
+
+	it("recognizes future-tense action promises", () => {
+		expect(classifyObviousUnexpectedStop("Создам оригинальную сцену и сохраню изображение в проект.")).toBe(true);
+		expect(classifyObviousUnexpectedStop("Сгенерирую безопасный вариант и покажу результат.")).toBe(true);
+	});
+
 	it("recognizes the observed unfinished file-operation promises", () => {
 		expect(
 			classifyObviousUnexpectedStop(
@@ -187,6 +208,10 @@ describe("classifyUnexpectedStop", () => {
 
 	it("leaves a completed status report to the configured classifier", () => {
 		expect(classifyObviousUnexpectedStop("Проверка завершена. Все тесты проходят.")).toBeUndefined();
+	});
+
+	it("does not let completion evidence before a later promise hide the interruption", () => {
+		expect(classifyObviousUnexpectedStop("Проверка завершена. Затем запущу приложение.")).toBe(true);
 	});
 
 	it("uses a reasoning-safe online classifier budget when the catalog disables reasoning", async () => {

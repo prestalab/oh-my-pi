@@ -9,6 +9,7 @@ import {
 	imageGenTool,
 	setImageProviderOrder,
 } from "@oh-my-pi/pi-coding-agent/tools/image-gen";
+import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const originalOpenRouterKey = Bun.env.OPENROUTER_API_KEY;
@@ -162,6 +163,56 @@ describe("imageGenTool", () => {
 		if (!savedPath) throw new Error("Expected generated image path");
 		expect(savedPath.endsWith(".webp")).toBe(true);
 		expect(await Bun.file(savedPath).bytes()).toEqual(Buffer.from("fake-webp"));
+	});
+
+	it("surfaces an OpenAI image refusal as a tool error", async () => {
+		const fetchMock: typeof fetch = (async () =>
+			new Response(
+				JSON.stringify({
+					output: [
+						{
+							type: "message",
+							content: [{ type: "refusal", refusal: "Sorry, I can’t generate that image as requested." }],
+						},
+					],
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			)) as unknown as typeof fetch;
+		const model = {
+			api: "openai-responses",
+			provider: "openai",
+			id: "gpt-5.5",
+			name: "GPT 5.5",
+			baseUrl: "https://api.openai.com/v1",
+		} as Model;
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKey: async () => "test-openai-key",
+				getApiKeyForProvider: async () => undefined,
+				authStorage: { rotateSessionCredential: async () => false },
+				resolver: () => async () => "test-openai-key",
+			} as unknown as ModelRegistry,
+			model,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		let thrown: unknown;
+		try {
+			await imageGenTool.execute("call-refusal", { subject: "protected characters" }, undefined, ctx);
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown).toBeInstanceOf(ToolError);
+		expect((thrown as Error).message).toContain("No image data returned.");
+		expect((thrown as Error).message).toContain("Sorry, I can’t generate that image as requested.");
 	});
 
 	it("routes OpenAI Images edits through the Responses image tool", async () => {
