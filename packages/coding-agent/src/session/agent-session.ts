@@ -1050,6 +1050,8 @@ export class AgentSession {
 			sessionId: () => this.sessionId,
 			emitSessionEvent: event => this.#emitSessionEvent(event),
 			scheduleAgentContinue: options => this.#scheduleAgentContinue(options),
+			requireNextToolCall: label => this.#toolChoiceQueue.pushOnce("required", { label, now: true }),
+			clearNextToolCallRequirement: label => this.#toolChoiceQueue.removeByLabel(label),
 			waitForSessionMessagePersistence: message => this.#waitForSessionMessagePersistence(message),
 			appendSessionMessage: message => this.#appendSessionMessage(message),
 			persistedAssistantEntryId: message => (message as PersistedAssistantMessage)[kPersistedSessionEntryId],

@@ -327,7 +327,13 @@ export async function submitInteractiveInput(
 				display: input.display ?? false,
 				attribution: "agent" as const,
 			};
-			await session.promptCustomMessage(message, { streamingBehavior });
+			await session.promptCustomMessage(message, {
+				streamingBehavior,
+				// An active goal can only terminate correctly by calling goal.complete.
+				// Requiring a tool on autonomous continuation also prevents the
+				// narration-only loop: intent -> text stop -> same intent.
+				toolChoice: input.customType === "goal-continuation" ? "required" : undefined,
+			});
 		} else if (input.synthetic) {
 			// Synthetic continue shortcuts are hidden developer prompts. The streaming
 			// queue (#queueUserMessage) only carries user-attributed messages, so we do

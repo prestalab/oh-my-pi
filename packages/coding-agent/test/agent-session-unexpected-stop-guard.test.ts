@@ -80,8 +80,10 @@ async function createHarness(
 
 	const sessionManager = SessionManager.inMemory(tempDir.path());
 	const tools = [recordTool as AgentTool];
+	let sessionForToolChoice: AgentSession | undefined;
 	const agent = new Agent({
 		getApiKey: () => "test-key",
+		getToolChoice: () => sessionForToolChoice?.nextToolChoiceDirective(),
 		initialState: {
 			model: mock,
 			systemPrompt: ["Test"],
@@ -99,6 +101,7 @@ async function createHarness(
 		modelRegistry,
 		toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
 	});
+	sessionForToolChoice = session;
 	const harness = { session, authStorage, tempDir };
 	activeHarnesses.push(harness);
 	return { ...harness, mock };
@@ -177,6 +180,35 @@ describe("AgentSession unexpected stop guard", () => {
 		expect(assistantText(session.agent.state.messages)).toContain("done now");
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
 		expect(JSON.stringify(reminderMessages(session.agent.state.messages))).toContain("xd:tool_call");
+		expect(mock.calls[1]?.options?.toolChoice).toBe("required");
+	});
+
+	it("forces recovered narration to become a tool call before allowing a final answer", async () => {
+		let calls = 0;
+		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockImplementation(async () => {
+			calls++;
+			return calls === 1;
+		});
+		const { session, mock } = await createHarness(
+			[
+				unexpectedStop("I will inspect the project now."),
+				recordCall("progress", "call-record-recovery-progress"),
+				{ content: ["done after real progress"], stopReason: "stop" },
+			],
+			{
+				"features.unexpectedStopDetection": true,
+				"providers.unexpectedStopModel": "online",
+			},
+		);
+
+		await session.prompt("do the thing");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(3);
+		expect(mock.calls[1]?.options?.toolChoice).toBe("required");
+		expect(mock.calls[2]?.options?.toolChoice).toBeUndefined();
+		expect(assistantText(session.agent.state.messages)).toContain("done after real progress");
+		expect(spy).toHaveBeenCalled();
 	});
 
 	it("classifies a thinking-only stop on its thinking text and continues", async () => {

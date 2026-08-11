@@ -68,6 +68,8 @@ function createHost(
 		sessionId: () => "test-session",
 		emitSessionEvent: async () => {},
 		scheduleAgentContinue: () => {},
+		requireNextToolCall: () => {},
+		clearNextToolCallRequirement: () => {},
 		waitForSessionMessagePersistence: async () => {},
 		appendSessionMessage: () => {},
 		sessionMessageAlreadyPersisted: () => false,

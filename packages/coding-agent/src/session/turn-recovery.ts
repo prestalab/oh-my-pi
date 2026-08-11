@@ -67,6 +67,7 @@ import { sameMessageContent, sessionMessagePersistenceKey } from "./turn-persist
 import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
 
 const THINKING_LOOP_REDIRECT_TYPE = "thinking-loop-redirect";
+const UNEXPECTED_STOP_TOOL_CHOICE_LABEL = "unexpected-stop-recovery";
 const UNEXPECTED_STOP_MAX_RETRIES = 3;
 const UNEXPECTED_STOP_TIMEOUT_DEFAULT_SECONDS = 30;
 const UNEXPECTED_STOP_TIMEOUT_MIN_SECONDS = 1;
@@ -141,7 +142,16 @@ export interface TurnRecoveryHost {
 	promptGeneration(): number;
 	sessionId(): string;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
-	scheduleAgentContinue(options: { delayMs?: number; generation?: number; onError?: (error: unknown) => void }): void;
+	scheduleAgentContinue(options: {
+		delayMs?: number;
+		generation?: number;
+		onError?: (error: unknown) => void;
+		onSkip?: () => void;
+	}): void;
+	/** Require the next provider request to perform an actual tool call. */
+	requireNextToolCall(label: string): void;
+	/** Remove a requirement whose scheduled continuation never started. */
+	clearNextToolCallRequirement(label: string): void;
 	waitForSessionMessagePersistence(message: AssistantMessage): Promise<void>;
 	appendSessionMessage(message: AssistantMessage): void;
 	persistedAssistantEntryId(message: AssistantMessage): string | undefined;
@@ -706,7 +716,16 @@ export class TurnRecovery {
 			attribution: "agent",
 			timestamp: Date.now(),
 		});
-		this.#host.scheduleAgentContinue({ generation: this.#host.promptGeneration() });
+		// A semantic "continue" nudge alone is insufficient: the observed failure
+		// mode answers that nudge with the same future-tense narration and stops
+		// again. Make forward progress a transport-level constraint. The model may
+		// choose any active tool (including ask/goal), but it cannot satisfy this
+		// recovery turn with another promise to act.
+		this.#host.requireNextToolCall(UNEXPECTED_STOP_TOOL_CHOICE_LABEL);
+		this.#host.scheduleAgentContinue({
+			generation: this.#host.promptGeneration(),
+			onSkip: () => this.#host.clearNextToolCallRequirement(UNEXPECTED_STOP_TOOL_CHOICE_LABEL),
+		});
 		return true;
 	}
 
