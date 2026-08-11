@@ -175,6 +175,7 @@ describe("AgentSession unexpected stop guard", () => {
 		expect(mock.calls).toHaveLength(2);
 		expect(assistantText(session.agent.state.messages)).toContain("done now");
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
+		expect(JSON.stringify(reminderMessages(session.agent.state.messages))).toContain("xd:tool_call");
 	});
 
 	it("classifies a thinking-only stop on its thinking text and continues", async () => {
@@ -242,6 +243,32 @@ describe("AgentSession unexpected stop guard", () => {
 		expect(mock.calls).toHaveLength(4);
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(3);
 		expect(warnSpy).toHaveBeenCalled();
+	});
+
+	it("resets the unexpected stop retry budget after a real tool call", async () => {
+		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(true);
+		const { session, mock } = await createHarness(
+			[
+				unexpectedStop("I should inspect this first."),
+				recordCall("progress", "call-record-progress"),
+				unexpectedStop("I should continue with the next check."),
+				unexpectedStop("I should continue with another check."),
+				unexpectedStop("I should finish the remaining check."),
+				{ content: ["done after tool progress"], stopReason: "stop" },
+			],
+			{
+				"features.unexpectedStopDetection": true,
+				"providers.unexpectedStopModel": "online",
+			},
+		);
+
+		await session.prompt("do the thing");
+		await session.waitForIdle();
+
+		expect(spy).toHaveBeenCalledTimes(5);
+		expect(mock.calls).toHaveLength(6);
+		expect(assistantText(session.agent.state.messages)).toContain("done after tool progress");
+		expect(reminderMessages(session.agent.state.messages)).toHaveLength(4);
 	});
 
 	it("does not classify a message that contains a tool call", async () => {

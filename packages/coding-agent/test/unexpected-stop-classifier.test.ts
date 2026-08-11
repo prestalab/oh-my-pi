@@ -3,6 +3,7 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
+	classifyObviousUnexpectedStop,
 	classifyUnexpectedStop,
 	isUnexpectedStopCandidate,
 	parseUnexpectedStopClassification,
@@ -103,6 +104,91 @@ describe("isUnexpectedStopCandidate", () => {
 });
 
 describe("classifyUnexpectedStop", () => {
+	it("recognizes an explicit Russian false tool-channel refusal without a model request", async () => {
+		expect(
+			classifyObviousUnexpectedStop(
+				"Не могу продолжить: интерфейс этой сессии не предоставил рабочий канал вызова инструментов.",
+			),
+		).toBe(true);
+	});
+
+	it("recognizes the observed Russian tool-interface refusal", () => {
+		expect(
+			classifyObviousUnexpectedStop(
+				"Начинаю read-only аудит. Не могу выполнить аудит: интерфейс инструментов в этой сессии не позволяет фактически вызвать task, glob и read.",
+			),
+		).toBe(true);
+	});
+
+	it("recognizes the observed missing-read refusal after earlier tools ran", () => {
+		expect(
+			classifyObviousUnexpectedStop(
+				"Читаю конфигурацию и тесты. Не могу завершить аудит: обязательный вызов read отсутствует в предоставленном логе.",
+			),
+		).toBe(true);
+	});
+
+	it("recognizes the observed not-called-tools refusal", () => {
+		expect(
+			classifyObviousUnexpectedStop(
+				"Структура получена. Не могу завершить аудит: обязательные grep и read не были вызваны.",
+			),
+		).toBe(true);
+	});
+
+	it("recognizes the observed failed-agent-result refusal", () => {
+		expect(
+			classifyObviousUnexpectedStop(
+				"Не удалось завершить аудит: результат scout недоступен через agent://SecureHerring; последующие glob и read не выполнялись.",
+			),
+		).toBe(true);
+	});
+
+	it("recognizes a stopped cleanup action followed by a terse audit failure", () => {
+		expect(
+			classifyObviousUnexpectedStop(
+				"Исключаю build-артефакты и сопоставляю маркеры с объявлениями символов. Не удалось завершить аудит.",
+			),
+		).toBe(true);
+	});
+
+	it("recognizes a parent that stopped while waiting for a running scout", () => {
+		expect(classifyObviousUnexpectedStop("Scout ещё выполняется; ожидаю автоматическую доставку результата.")).toBe(
+			true,
+		);
+	});
+
+	it("recognizes a Russian action promise that stopped before the action", () => {
+		expect(
+			classifyObviousUnexpectedStop("Проверю исходники и незавершённые места, затем соберу и запущу приложение."),
+		).toBe(true);
+	});
+
+	it("recognizes the observed image-generation promise followed by a tool-access refusal", () => {
+		expect(
+			classifyObviousUnexpectedStop(
+				"Генерирую недостающие изображения, сохраняю все четыре в проект и встраиваю их в страницу.Продолжу после восстановления доступа к инструментам.",
+			),
+		).toBe(true);
+	});
+
+	it("recognizes the observed unfinished file-operation promises", () => {
+		expect(
+			classifyObviousUnexpectedStop(
+				"Доделываю: последний портрет, перенос трёх файлов, интеграция и проверка в Chromium.Не могу выполнить файловые операции и генерацию в текущем ответе.",
+			),
+		).toBe(true);
+		expect(
+			classifyObviousUnexpectedStop(
+				"Встраиваю изображения и проверяю файлы и поведение страницы.Продолжение невозможно без нового запроса: в текущем сообщении нет доступного вызова файлового инструмента.",
+			),
+		).toBe(true);
+	});
+
+	it("leaves a completed status report to the configured classifier", () => {
+		expect(classifyObviousUnexpectedStop("Проверка завершена. Все тесты проходят.")).toBeUndefined();
+	});
+
 	it("uses a reasoning-safe online classifier budget when the catalog disables reasoning", async () => {
 		const baseModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!baseModel) throw new Error("Expected bundled Claude Sonnet 4.5 model");

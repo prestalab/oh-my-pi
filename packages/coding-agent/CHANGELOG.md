@@ -171,6 +171,8 @@
 - Fixed bash.patterns allow rules rejecting valid commands when quoted arguments contained shell metacharacters (such as Cargo benchmark regex filters).
 ### Fixed
 
+- **Critical reliability fix — interrupted responses and dropped tools:** Narration-only promises such as “checking”, “generating”, or “finishing” no longer silently end active work; OMP retries the action with the provider's explicit tool fallback, resets the retry budget after real tool progress, and keeps main agents and subagents running through multi-tool workflows.
+- Fixed GitLab-backed Claude models failing to spawn tasks when they reuse Claude Code's `description` and `subagent_type` argument names, and clarified that parents must wait for automatic delivery instead of reading a running subagent's unavailable `agent://` result.
 - Fixed explicit model scopes reporting configured GitLab Duo models as unknown during startup by refreshing a missing credential-scoped provider before resolving the enabled model list.
 
 ## [17.2.6] - 2026-08-03

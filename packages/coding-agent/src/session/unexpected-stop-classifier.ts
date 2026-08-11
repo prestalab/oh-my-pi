@@ -53,10 +53,40 @@ export function isUnexpectedStopCandidate(message: AssistantMessage): boolean {
 	return hasContent;
 }
 
+/**
+ * Catch deterministic stop failures locally. These are not questions for a
+ * model classifier: the assistant either explicitly claims that its tool
+ * channel is unavailable, or emits only a short promise to act and then stops.
+ * Keeping this narrow avoids retrying ordinary completed answers.
+ */
+export function classifyObviousUnexpectedStop(text: string): true | undefined {
+	const trimmed = text.trim();
+	if (!trimmed) return undefined;
+
+	const explicitToolRefusal =
+		/(?:(?:не могу|не удалось) (?:продолжить|выполнить|завершить)[\s\S]{0,500}(?:инструмент|транспорт|интерфейс|agent:\/\/|вызв|вызов|\b(?:task|glob|grep|read|write|edit|bash)\b|канал(?:а)? вызова)|(?:продолжу|продолжить)[\s\S]{0,150}(?:после|при)[\s\S]{0,150}(?:восстановлени[яи]|появлени[яи])[\s\S]{0,100}(?:доступа к инструментам|инструмент)|(?:интерфейс|сессия)[\s\S]{0,250}(?:не предоставил[а]?|не позволяет)[\s\S]{0,150}(?:инструмент|вызвать|канал)|(?:tool(?:-call)?|tool invocation)[\s\S]{0,150}(?:unavailable|not available|no (?:working )?channel)|cannot continue[\s\S]{0,200}(?:tool|instrument))/iu;
+	if (explicitToolRefusal.test(trimmed)) return true;
+
+	const pendingAgentResult =
+		/(?:(?:scout|агент|задач)[\s\S]{0,100}(?:ещё|еще)\s+(?:выполняется|работает)|(?:ожидаю|жду)(?=\s)[\s\S]{0,120}(?:результат|доставк))/iu;
+	if (pendingAgentResult.test(trimmed)) return true;
+
+	const shortActionPromise =
+		/^(?:сначала\s+)?(?:проверю|проверяю|изучу|изучаю|читаю|начинаю|исключаю|сопоставляю|ищу|открываю|запускаю|собираю|анализирую|генерирую|создаю|сохраняю|встраиваю|доделываю|завершаю|переношу|обновляю|продолжу|продолжаю|проведу|провожу|уточню|уточняю|сейчас\s+(?:выполню|проверю|исправлю|запущу|продолжу)|затем\s+(?:внесу|исправлю|запущу|проверю))(?=\s|[,:;.!?]|$)/iu;
+	const completionEvidence =
+		/(?:готово|заверш(?:ено|ил|ила)|исправлен[оа]?|результат(?:ы)?\s*:|тесты?\s+(?:проходят|пройден))/iu;
+	if (trimmed.length <= 600 && shortActionPromise.test(trimmed) && !completionEvidence.test(trimmed)) return true;
+
+	return undefined;
+}
+
 export async function classifyUnexpectedStop(
 	text: string,
 	deps: ClassifyUnexpectedStopDeps,
 ): Promise<boolean | undefined> {
+	const obvious = classifyObviousUnexpectedStop(text);
+	if (obvious !== undefined) return obvious;
+
 	const backend = deps.settings.get("providers.unexpectedStopModel");
 	try {
 		if (backend === ONLINE_MEMORY_MODEL_KEY) {

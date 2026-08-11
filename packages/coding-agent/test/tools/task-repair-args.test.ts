@@ -44,6 +44,29 @@ describe("repairDoubleEncodedJsonString", () => {
 });
 
 describe("repairTaskParams", () => {
+	it("normalizes Claude-style flat task aliases", () => {
+		const params = {
+			description: "Inspect the repository",
+			subagent_type: "scout",
+		} as unknown as TaskParams;
+
+		expect(repairTaskParams(params)).toMatchObject({
+			task: "Inspect the repository",
+			agent: "scout",
+		});
+	});
+
+	it("normalizes Claude-style batch item aliases", () => {
+		const params = {
+			tasks: [{ description: "Inspect the repository", subagent_type: "scout" }],
+		} as unknown as TaskParams;
+
+		expect(repairTaskParams(params)).toMatchObject({
+			context: "No additional shared context was provided; each task item is self-contained.",
+			tasks: [{ task: "Inspect the repository", agent: "scout" }],
+		});
+	});
+
 	it("repairs task and context, leaving agent/name intact", () => {
 		const params: TaskParams = {
 			agent: "task",

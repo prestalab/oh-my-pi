@@ -234,6 +234,11 @@ export class TurnRecovery {
 
 	/** Closes a successful retry saga and annotates recovered persisted errors. */
 	async onAssistantSettledSuccessfully(message: AssistantMessage): Promise<void> {
+		if (message.stopReason === "toolUse" && message.content.some(content => content.type === "toolCall")) {
+			// The retry cap guards consecutive narration-only stops. A real tool call
+			// is forward progress, so later narration must start with a fresh budget.
+			this.#unexpectedStopRetryCount = 0;
+		}
 		if (
 			message.stopReason === "error" ||
 			message.stopReason === "aborted" ||
